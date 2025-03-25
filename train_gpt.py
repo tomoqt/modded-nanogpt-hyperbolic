@@ -102,6 +102,55 @@ def setup_context(ctx: torch.autograd.function.FunctionCtx, inputs, output):
 mm_op.register_autograd(backward, setup_context=setup_context)
 
 # -----------------------------------------------------------------------------
+# Hyperbolic geometry utility functions
+
+def mobius_addition(x, y, c):
+    """Mobius addition in hyperbolic space with curvature c"""
+    # Compute norms
+    x_norm = torch.norm(x, dim=-1, keepdim=True)
+    y_norm = torch.norm(y, dim=-1, keepdim=True)
+    # Compute the inner product
+    inner_product = torch.sum(x * y, dim=-1, keepdim=True)
+    
+    # Compute numerator and denominator following the standard formula
+    numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
+                (1 - c * (x_norm ** 2)) * y
+    denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
+    
+    return numerator / denominator
+
+def scaling_factor(x, c):
+    """Compute scaling factor for hyperbolic space with curvature c"""
+    x_norm = torch.norm(x, dim=-1, keepdim=True)
+    return 2/(1+c*x_norm**2)
+
+def expmap(x, v, c):
+    """Exponential map from tangent space to hyperbolic space with curvature c"""
+    scaling_factor_x = scaling_factor(x, c)
+    v_norm = torch.norm(v, dim=-1, keepdim=True)
+    second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/v_norm
+    return mobius_addition(x, second_term, c)
+
+def logmap(x, u, c):
+    """Logarithmic map from hyperbolic space to tangent space with curvature c"""
+    scaling_factor_x = scaling_factor(x, c)
+    mob_addition = mobius_addition(-x, u, c)
+    addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
+    constant_factor = 2 / (scaling_factor_x * c**0.5)
+    direction_factor = mob_addition / addition_norm
+    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)
+    return constant_factor * torch.arctanh(arg) * direction_factor
+
+def calculate_reference_point(x):
+    """Calculate reference point for hyperbolic operations"""
+    B, T, C = x.size()
+    ref_point = torch.zeros_like(x[:, :1, :])
+    if T > 1:
+        ref_point = x[:, :-1, :]
+        ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
+    return ref_point
+
+# -----------------------------------------------------------------------------
 # Muon optimizer
 
 @torch.compile
@@ -250,10 +299,12 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128, curvature=1.0, map_back_after_attention=True):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.c = curvature  # Curvature parameter
+        self.map_back_after_attention = map_back_after_attention  # Whether to map back to hyperbolic space after attention
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
         bound = (3 ** 0.5) * std # improved init scale by @YouJiacheng
@@ -268,47 +319,89 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
         B, T = x.size(0), x.size(1) # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
-        q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
+
+        # Calculate reference point for hyperbolic operations
+        reference_point = calculate_reference_point(x)
+        
+        # Map input to hyperbolic tangent space
+        x_hyperbolic = logmap(reference_point, x, self.c)
+        
+        # Project to QKV
+        q, k, v = F.linear(x_hyperbolic, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
+        
         if ve is not None:
             v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v) # @KoszarskyB & @Grad62304977
         else: # skip mid-layers token value embeddings by @YouJiacheng
             v = self.lambdas[0] * v
+            
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, scale=0.12).transpose(1, 2)
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
+        
+        # Output projection
         y = self.c_proj(y)
-        return y
+        
+        # Map back to hyperbolic space if specified
+        if self.map_back_after_attention:
+            y = expmap(reference_point, y, self.c)
+            
+        return y, reference_point
 
 class MLP(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, curvature=1.0, map_back_after_attention=True):
         super().__init__()
         hdim = 4 * dim
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
         self.c_proj.weight.detach().zero_() # zero init suggested by @Grad62304977
+        self.c = curvature  # Curvature parameter
+        self.map_back_after_attention = map_back_after_attention  # Whether to map back after MLP
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, reference_point=None):
         x = self.c_fc(x)
         x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
         x = self.c_proj(x)
+        
+        # Map back to hyperbolic space if not already done by attention
+        if not self.map_back_after_attention and reference_point is not None:
+            x = expmap(reference_point, x, self.c)
+            
         return x
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, curvature_mode='random', curvature=1.0, map_back_after_attention=True):
         super().__init__()
+        
+        # Handle curvature - three modes: fixed, parametric, or random
+        if curvature_mode == 'fixed':
+            self.c = curvature
+        elif curvature_mode == 'parametric':
+            self.c = nn.Parameter(torch.tensor(curvature))
+            self.c.requires_grad = True
+        else:  # Default to random initialization
+            self.c = nn.Parameter(torch.rand(1))
+            self.c.requires_grad = True
+            
         # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
-        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if layer_idx != 7 else None
-        self.mlp = MLP(dim)
+        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
+        self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
+        self.map_back_after_attention = map_back_after_attention
 
     def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
+        reference_point = None
+        
         if self.attn is not None:
-            x = x + self.attn(norm(x), ve, block_mask)
-        x = x + self.mlp(norm(x))
+            attn_output, reference_point = self.attn(norm(x), ve, block_mask)
+            x = x + attn_output
+            
+        mlp_output = self.mlp(norm(x), reference_point)
+        x = x + mlp_output
+        
         return x
 
 # -----------------------------------------------------------------------------
@@ -318,13 +411,28 @@ def next_multiple_of_n(v: float | int, *, n: int):
     return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int):
+    def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int, 
+                 curvature_mode='random', curvature=1.0, map_back_after_attention=True):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i) for i in range(num_layers)])
+        
+        # Store hyperbolic parameters for blocks
+        self.curvature_mode = curvature_mode
+        self.curvature = curvature
+        self.map_back_after_attention = map_back_after_attention
+        
+        # Initialize blocks with hyperbolic parameters
+        self.blocks = nn.ModuleList([
+            Block(model_dim, num_heads, max_seq_len, i, 
+                  curvature_mode=curvature_mode, 
+                  curvature=curvature,
+                  map_back_after_attention=map_back_after_attention) 
+            for i in range(num_layers)
+        ])
+        
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
         self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128),
@@ -451,6 +559,10 @@ class Hyperparameters:
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
+    # hyperbolic parameters
+    curvature_mode = 'random' # 'fixed', 'parametric', or 'random'
+    curvature = 1.0 # Fixed curvature value when curvature_mode is 'fixed'
+    map_back_after_attention = True # whether to map back to hyperbolic space after attention or after the MLP
     # evaluation and logging
     val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
@@ -459,7 +571,7 @@ args = Hyperparameters()
 # torchrun sets these env variables
 rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
-assert world_size == 8 # this code is designed for 8xH100
+# This code now works with any number of GPUs (was originally optimized for 8xH100)
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
@@ -497,8 +609,11 @@ print0("="*100)
 #    Construct model and optimizer     #
 ########################################
 
-model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=768,
-                       max_seq_len=max(args.train_seq_len, args.val_seq_len)).cuda()
+model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=6, num_heads=6, model_dim=384,
+                       max_seq_len=max(args.train_seq_len, args.val_seq_len),
+                       curvature_mode=args.curvature_mode,
+                       curvature=args.curvature,
+                       map_back_after_attention=args.map_back_after_attention).cuda()
 for m in model.modules():
     if isinstance(m, nn.Embedding):
         m.bfloat16()
