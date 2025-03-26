@@ -25,7 +25,7 @@ Contributors list (growing with each new record): [@bozavlado](https://x.com/boz
 
 To run the current record, run the following commands.
 ```bash
-git clone https://github.com/KellerJordan/modded-nanogpt.git && cd modded-nanogpt
+git clone https://github.com/tomoqt/modded-nanogpt-hyperbolic.git && cd modded-nanogpt
 pip install -r requirements.txt
 pip install --pre torch==2.7.0.dev20250110+cu126 --index-url https://download.pytorch.org/whl/nightly/cu126 --upgrade
 python data/cached_fineweb10B.py 8 # downloads only the first 800M training tokens to save time
@@ -41,7 +41,7 @@ This approach standardizes versions for CUDA, NCCL, CUDNN, and Python, reducing 
 Note: an NVIDIA driver must already be installed on the system (useful if only the NVIDIA driver and Docker are available).
 
 ```bash
-git clone https://github.com/KellerJordan/modded-nanogpt.git && cd modded-nanogpt
+git clone https://github.com/tomoqt/modded-nanogpt-hyperbolic.git && cd modded-nanogpt
 sudo docker build -t modded-nanogpt .
 sudo docker run -it --rm --gpus all -v $(pwd):/modded-nanogpt modded-nanogpt python data/cached_fineweb10B.py 8
 sudo docker run -it --rm --gpus all -v $(pwd):/modded-nanogpt modded-nanogpt sh run.sh
