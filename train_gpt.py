@@ -658,10 +658,6 @@ def get_window_size_blocks(step: int):
     window_size = next_multiple_of_n(1728 * x, n=128)
     return get_window_size_blocks_helper(window_size)
 
-# Configure Triton compiler options to reduce shared memory usage
-torch._inductor.config.triton.max_block_size = 512  # Reduce block size to limit shared memory usage
-torch._inductor.config.triton.max_tiles = 8  # Limit tiling to reduce memory requirements
-
 model: nn.Module = torch.compile(model, dynamic=False)
 
 ########################################
