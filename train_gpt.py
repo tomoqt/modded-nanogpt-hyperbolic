@@ -23,10 +23,9 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention
 #torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 
 # Configure Triton compiler options to reduce shared memory usage
-if hasattr(torch._inductor.config.triton, "max_block_size"):
-    torch._inductor.config.triton.max_block_size = 512  # Reduce block size to limit shared memory usage
-torch._inductor.config.triton.max_tiles = 8  # Limit tiling to reduce memory requirements
-torch._inductor.config.triton.num_stages = 1   # Reduce number of stages to further reduce shared memory usage
+torch._inductor.config.triton.max_block_size = 256  # Further reduce block size
+torch._inductor.config.triton.max_tiles = 4  # Further reduce tiling
+torch._inductor.config.triton.num_stages = 2 # Explicitly set num_stages lower
 
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
@@ -663,6 +662,11 @@ def get_window_size_blocks(step: int):
     # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
     window_size = next_multiple_of_n(1728 * x, n=128)
     return get_window_size_blocks_helper(window_size)
+
+# Configure Triton compiler options to reduce shared memory usage
+torch._inductor.config.triton.max_block_size = 256  # Further reduce block size
+torch._inductor.config.triton.max_tiles = 4  # Further reduce tiling
+torch._inductor.config.triton.num_stages = 2 # Explicitly set num_stages lower
 
 model: nn.Module = torch.compile(model, dynamic=False)
 
