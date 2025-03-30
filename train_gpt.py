@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+# Configure shared memory limits for Triton kernels
+os.environ["PYTORCH_TRITON_MAX_SHARED_MEMORY_PER_BLOCK"] = "98304"  # Set below hardware limit
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 torch.empty(1, device="cuda", requires_grad=True).backward() # prevents a bug on some systems
@@ -549,8 +551,8 @@ class Hyperparameters:
     train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
     val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 48*128 # FlexAttention sequence length
-    val_seq_len = 4*64*128 # FlexAttention sequence length for validation
+    train_seq_len = 48*1024 # FlexAttention sequence length
+    val_seq_len = 4*64*1024 # FlexAttention sequence length for validation
     # optimization
     num_iterations = 1770 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
@@ -606,7 +608,7 @@ print0("="*100)
 #    Construct model and optimizer     #
 ########################################
 
-model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=768,
+model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=128,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
@@ -655,6 +657,10 @@ def get_window_size_blocks(step: int):
     # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
     window_size = next_multiple_of_n(1728 * x, n=128)
     return get_window_size_blocks_helper(window_size)
+
+# Configure Triton compiler options to reduce shared memory usage
+torch._inductor.config.triton.max_block_size = 512  # Reduce block size to limit shared memory usage
+torch._inductor.config.triton.max_tiles = 8  # Limit tiling to reduce memory requirements
 
 model: nn.Module = torch.compile(model, dynamic=False)
 
