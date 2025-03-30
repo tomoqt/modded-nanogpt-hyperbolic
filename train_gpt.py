@@ -606,7 +606,7 @@ print0("="*100)
 #    Construct model and optimizer     #
 ########################################
 
-model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=128,
+model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=384,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
