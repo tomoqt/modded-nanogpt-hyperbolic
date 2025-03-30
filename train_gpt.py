@@ -277,7 +277,7 @@ class CastedLinear(nn.Linear):
             out: Tensor = torch.ops.nanogpt.mm(_x, self.weight, x_s=self.x_s, w_s=self.w_s, grad_s=self.grad_s)[0]
             return out.reshape(*x.shape[:-1], -1)
         else:
-            return F.linear(x, self.weight.to(x.dtype))
+            return F.linear(x, self.weight.type_as(x))
 
 class Rotary(nn.Module):
     def __init__(self, dim: int, max_seq_len: int):
@@ -303,8 +303,8 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.c = curvature  # Curvature parameter
-        self.map_back_after_attention = map_back_after_attention  # Whether to map back to hyperbolic space after attention
+        self.c = torch.tensor(curvature, dtype=torch.bfloat16)  # Store as bfloat16
+        self.map_back_after_attention = map_back_after_attention
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
         bound = (3 ** 0.5) * std # improved init scale by @YouJiacheng
@@ -356,9 +356,9 @@ class MLP(nn.Module):
         hdim = 4 * dim
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
-        self.c_proj.weight.detach().zero_() # zero init suggested by @Grad62304977
-        self.c = curvature  # Curvature parameter
-        self.map_back_after_attention = map_back_after_attention  # Whether to map back after MLP
+        self.c_proj.weight.detach().zero_()# zero init suggested by @Grad62304977
+        self.c = torch.tensor(curvature, dtype=torch.bfloat16)  # Store as bfloat16
+        self.map_back_after_attention = map_back_after_attention
 
     def forward(self, x: Tensor, reference_point=None):
         x = self.c_fc(x)
@@ -377,17 +377,14 @@ class Block(nn.Module):
         
         # Handle curvature - three modes: fixed, parametric, or random
         if curvature_mode == 'fixed':
-            self.c = curvature
+            self.c = torch.tensor(curvature, dtype=torch.bfloat16)
         elif curvature_mode == 'parametric':
-            self.c = nn.Parameter(torch.tensor(curvature))
-            self.c.requires_grad = True
+            self.c = nn.Parameter(torch.tensor(curvature, dtype=torch.bfloat16))
         else:  # Default to random initialization
-            self.c = nn.Parameter(torch.rand(1))
-            self.c.requires_grad = True
+            self.c = nn.Parameter(torch.rand(1, dtype=torch.bfloat16))
             
-        # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
-        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
-        self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention)
+        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=curvature, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
+        self.mlp = MLP(dim, curvature=curvature, map_back_after_attention=map_back_after_attention)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
         self.map_back_after_attention = map_back_after_attention
 
@@ -710,7 +707,7 @@ for step in range(train_steps + 1):
         with torch.no_grad():
             for _ in range(val_steps):
                 inputs, targets = next(val_loader)
-                val_loss += model(inputs.to(torch.int32), targets, get_window_size_blocks(step))
+                val_loss += model(inputs, targets, get_window_size_blocks(step))
         val_loss /= val_steps
         del val_loader
         dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
@@ -730,7 +727,7 @@ for step in range(train_steps + 1):
 
     # --------------- TRAINING SECTION -----------------
     inputs, targets = next(train_loader)
-    model(inputs.to(torch.int32), targets, get_window_size_blocks(step)).backward()
+    model(inputs, targets, get_window_size_blocks(step)).backward()
     for param in model.parameters():
         dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     # set optimization hyperparameters
