@@ -301,7 +301,7 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128, curvature=1.0, map_back_after_attention=True):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=64, curvature=1.0, map_back_after_attention=True):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -608,7 +608,7 @@ print0("="*100)
 #    Construct model and optimizer     #
 ########################################
 
-model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=512,
+model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=768,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
