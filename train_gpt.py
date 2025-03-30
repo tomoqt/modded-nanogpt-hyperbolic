@@ -549,8 +549,8 @@ class Hyperparameters:
     train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
     val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 48*256 # FlexAttention sequence length
-    val_seq_len = 4*64*256 # FlexAttention sequence length for validation
+    train_seq_len = 48*128 # FlexAttention sequence length
+    val_seq_len = 4*64*128 # FlexAttention sequence length for validation
     # optimization
     num_iterations = 1770 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
