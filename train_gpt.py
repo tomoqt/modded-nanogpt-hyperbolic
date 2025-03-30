@@ -22,6 +22,11 @@ import torch.distributed as dist
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
 #torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 
+# Configure Triton compiler options to reduce shared memory usage
+torch._inductor.config.triton.max_block_size = 512  # Reduce block size to limit shared memory usage
+torch._inductor.config.triton.max_tiles = 8  # Limit tiling to reduce memory requirements
+torch._inductor.config.triton.num_stages = 1   # Reduce number of stages to further reduce shared memory usage
+
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
 
