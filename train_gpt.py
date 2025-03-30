@@ -560,7 +560,7 @@ class Hyperparameters:
     # hyperbolic parameters
     curvature_mode = 'random' # 'fixed', 'parametric', or 'random'
     curvature = 1.0 # Fixed curvature value when curvature_mode is 'fixed'
-    map_back_after_attention = True # whether to map back to hyperbolic space after attention or after the MLP
+    map_back_after_attention = False # whether to map back to hyperbolic space after attention or after the MLP
     # evaluation and logging
     val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
