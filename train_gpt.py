@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+# Configure shared memory limits for Triton kernels
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 torch.empty(1, device="cuda", requires_grad=True).backward() # prevents a bug on some systems
@@ -112,32 +113,52 @@ def mobius_addition(x, y, c):
     # Compute the inner product
     inner_product = torch.sum(x * y, dim=-1, keepdim=True)
     
+    # Ensure c is on the same device as x
+    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    
     # Compute numerator and denominator following the standard formula
     numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
                 (1 - c * (x_norm ** 2)) * y
     denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
     
-    return numerator / denominator
+    # Add small epsilon to avoid division by zero
+    epsilon = 1e-8
+    return numerator / (denominator + epsilon)
 
 def scaling_factor(x, c):
     """Compute scaling factor for hyperbolic space with curvature c"""
     x_norm = torch.norm(x, dim=-1, keepdim=True)
+    # Ensure c is on the same device as x
+    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     return 2/(1+c*x_norm**2)
 
 def expmap(x, v, c):
     """Exponential map from tangent space to hyperbolic space with curvature c"""
     scaling_factor_x = scaling_factor(x, c)
     v_norm = torch.norm(v, dim=-1, keepdim=True)
-    second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/v_norm
+    
+    # Ensure c is on the same device as x
+    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    
+    # Add small epsilon to avoid division by zero
+    epsilon = 1e-8
+    # Safe division with epsilon
+    safe_v_norm = v_norm + epsilon
+    second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/safe_v_norm
     return mobius_addition(x, second_term, c)
 
 def logmap(x, u, c):
     """Logarithmic map from hyperbolic space to tangent space with curvature c"""
+    # Ensure c is on the same device as x
+    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    
     scaling_factor_x = scaling_factor(x, c)
     mob_addition = mobius_addition(-x, u, c)
     addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
-    constant_factor = 2 / (scaling_factor_x * c**0.5)
-    direction_factor = mob_addition / addition_norm
+    # Add small epsilon to avoid division by zero
+    epsilon = 1e-8  
+    constant_factor = 2 / (scaling_factor_x * c**0.5 + epsilon)
+    direction_factor = mob_addition / (addition_norm + epsilon)
     arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)
     return constant_factor * torch.arctanh(arg) * direction_factor
 
@@ -303,7 +324,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.c = torch.tensor(curvature, dtype=torch.bfloat16)  # Store as bfloat16
+        self.c = curvature
         self.map_back_after_attention = map_back_after_attention
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
@@ -330,13 +351,13 @@ class CausalSelfAttention(nn.Module):
         q, k, v = F.linear(x_hyperbolic, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
-        
-        '''
+
+        ''' 
         if ve is not None:
             v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v) # @KoszarskyB & @Grad62304977
         else: # skip mid-layers token value embeddings by @YouJiacheng
             v = self.lambdas[0] * v
-        '''
+        '''   
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, scale=0.12).transpose(1, 2)
@@ -358,7 +379,8 @@ class MLP(nn.Module):
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
         self.c_proj.weight.detach().zero_()# zero init suggested by @Grad62304977
-        self.c = torch.tensor(curvature, dtype=torch.bfloat16)  # Store as bfloat16
+        # Store curvature parameter directly
+        self.c = curvature
         self.map_back_after_attention = map_back_after_attention
 
     def forward(self, x: Tensor, reference_point=None):
@@ -378,14 +400,16 @@ class Block(nn.Module):
         
         # Handle curvature - three modes: fixed, parametric, or random
         if curvature_mode == 'fixed':
-            self.c = torch.tensor(curvature, dtype=torch.bfloat16)
+            self.c = curvature  # Store as a float/scalar
         elif curvature_mode == 'parametric':
-            self.c = nn.Parameter(torch.tensor(curvature, dtype=torch.bfloat16))
+            self.c = nn.Parameter(torch.tensor(curvature))
         else:  # Default to random initialization
-            self.c = nn.Parameter(torch.rand(1, dtype=torch.bfloat16))
+            self.c = nn.Parameter(torch.rand(1))
+            self.c.requires_grad = True
             
-        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=curvature, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
-        self.mlp = MLP(dim, curvature=curvature, map_back_after_attention=map_back_after_attention)
+        # Pass curvature parameter directly instead of just its value
+        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
+        self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
         self.map_back_after_attention = map_back_after_attention
 
@@ -607,7 +631,7 @@ print0("="*100)
 #    Construct model and optimizer     #
 ########################################
 
-model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=128,
+model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=768,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
