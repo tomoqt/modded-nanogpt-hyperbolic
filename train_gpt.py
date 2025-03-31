@@ -325,8 +325,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
-        # Store curvature as a float, will be converted to tensor on the right device when needed
-        self.c = curvature if isinstance(curvature, (int, float)) else curvature.item()
+        self.c = curvature
         self.map_back_after_attention = map_back_after_attention
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
@@ -346,7 +345,7 @@ class CausalSelfAttention(nn.Module):
         # Calculate reference point for hyperbolic operations
         reference_point = calculate_reference_point(x)
         
-        # Map input to hyperbolic tangent space
+        # Map input to hyperbolic tangent space - use curvature parameter directly
         x_hyperbolic = logmap(reference_point, x, self.c)
         
         # Project to QKV
@@ -368,7 +367,7 @@ class CausalSelfAttention(nn.Module):
         # Output projection
         y = self.c_proj(y)
         
-        # Map back to hyperbolic space if specified
+        # Map back to hyperbolic space if specified - use curvature parameter directly
         if self.map_back_after_attention:
             y = expmap(reference_point, y, self.c)
             
@@ -381,8 +380,8 @@ class MLP(nn.Module):
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
         self.c_proj.weight.detach().zero_()# zero init suggested by @Grad62304977
-        # Store curvature as a float, will be converted to tensor on the right device when needed
-        self.c = curvature if isinstance(curvature, (int, float)) else curvature.item()
+        # Store curvature parameter directly
+        self.c = curvature
         self.map_back_after_attention = map_back_after_attention
 
     def forward(self, x: Tensor, reference_point=None):
@@ -390,7 +389,7 @@ class MLP(nn.Module):
         x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
         x = self.c_proj(x)
         
-        # Map back to hyperbolic space if not already done by attention
+        # Map back to hyperbolic space if not already done by attention - use curvature parameter directly
         if not self.map_back_after_attention and reference_point is not None:
             x = expmap(reference_point, x, self.c)
             
@@ -409,10 +408,9 @@ class Block(nn.Module):
             self.c = nn.Parameter(torch.rand(1))
             self.c.requires_grad = True
             
-        # Pass curvature value directly
-        curvature_val = self.c.item() if isinstance(self.c, nn.Parameter) else self.c
-        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=curvature_val, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
-        self.mlp = MLP(dim, curvature=curvature_val, map_back_after_attention=map_back_after_attention)
+        # Pass curvature parameter directly instead of just its value
+        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
+        self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
         self.map_back_after_attention = map_back_after_attention
 
