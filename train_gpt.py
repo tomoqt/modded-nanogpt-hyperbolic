@@ -35,8 +35,8 @@ def mm_op(x: Tensor, w: Tensor, x_s: float, w_s: float, grad_s: float) -> tuple[
             x_f8,
             w_f8.T,
             out_dtype=torch.bfloat16,
-            scale_a=x.new_tensor(x_s, dtype=torch.float32),
-            scale_b=x.new_tensor(w_s, dtype=torch.float32),
+            scale_a=x.new_tensor(x_s, dtype=torch.bfloat16),
+            scale_b=x.new_tensor(w_s, dtype=torch.bfloat16),
             use_fast_accum=True,
         )
         return out, x_f8, w_f8
@@ -56,16 +56,18 @@ def mm_backward_op(g: Tensor, x_f8: Tensor, w_f8: Tensor, x_s: float, w_s: float
     @torch.compile
     def impl(grad: Tensor, x_f8: Tensor, w_f8: Tensor):
         assert grad.is_contiguous()
-        x_inv_s = grad.new_tensor(x_s, dtype=torch.float32)
-        w_inv_s = grad.new_tensor(w_s, dtype=torch.float32)
-        grad_inv_s = grad.new_tensor(grad_s, dtype=torch.float32)
+        # Create scaling tensors for grad_x (bfloat16) and for grad_w (float32)
+        x_inv_s_bf16 = grad.new_tensor(x_s, dtype=torch.bfloat16)
+        w_inv_s_bf16 = grad.new_tensor(w_s, dtype=torch.bfloat16)
+        x_inv_s_f32 = grad.new_tensor(x_s, dtype=torch.float32)
+        grad_inv_s_f32 = grad.new_tensor(grad_s, dtype=torch.float32)
         grad_f8 = grad.div(grad_s).to(torch.float8_e5m2)
         grad_x = torch._scaled_mm(
             grad_f8,
             w_f8.T.contiguous().T,
             out_dtype=torch.bfloat16,
-            scale_a=grad_inv_s,
-            scale_b=w_inv_s,
+            scale_a=x_inv_s_bf16,
+            scale_b=w_inv_s_bf16,
             use_fast_accum=False,
         )
         # faster than grad_f8_t @ x_f8, for (d_out, d_in) == (50304, 768)
@@ -73,8 +75,8 @@ def mm_backward_op(g: Tensor, x_f8: Tensor, w_f8: Tensor, x_s: float, w_s: float
             x_f8.T.contiguous(),
             grad_f8.T.contiguous().T,
             out_dtype=torch.float32,
-            scale_a=x_inv_s,
-            scale_b=grad_inv_s,
+            scale_a=x_inv_s_f32,
+            scale_b=grad_inv_s_f32,
             use_fast_accum=False,
         ).T
         return grad_x, grad_w
