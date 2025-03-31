@@ -35,8 +35,8 @@ def mm_op(x: Tensor, w: Tensor, x_s: float, w_s: float, grad_s: float) -> tuple[
             x_f8,
             w_f8.T,
             out_dtype=torch.bfloat16,
-            scale_a=x.new_tensor(x_s, dtype=torch.bfloat16),
-            scale_b=x.new_tensor(w_s, dtype=torch.bfloat16),
+            scale_a=x.new_tensor(x_s, dtype=torch.float32),
+            scale_b=x.new_tensor(w_s, dtype=torch.float32),
             use_fast_accum=True,
         )
         return out, x_f8, w_f8
@@ -56,18 +56,16 @@ def mm_backward_op(g: Tensor, x_f8: Tensor, w_f8: Tensor, x_s: float, w_s: float
     @torch.compile
     def impl(grad: Tensor, x_f8: Tensor, w_f8: Tensor):
         assert grad.is_contiguous()
-        # Create scaling tensors for grad_x (bfloat16) and for grad_w (float32)
-        x_inv_s_bf16 = grad.new_tensor(x_s, dtype=torch.bfloat16)
-        w_inv_s_bf16 = grad.new_tensor(w_s, dtype=torch.bfloat16)
-        x_inv_s_f32 = grad.new_tensor(x_s, dtype=torch.float32)
-        grad_inv_s_f32 = grad.new_tensor(grad_s, dtype=torch.float32)
+        x_inv_s = grad.new_tensor(x_s, dtype=torch.float32)
+        w_inv_s = grad.new_tensor(w_s, dtype=torch.float32)
+        grad_inv_s = grad.new_tensor(grad_s, dtype=torch.float32)
         grad_f8 = grad.div(grad_s).to(torch.float8_e5m2)
         grad_x = torch._scaled_mm(
             grad_f8,
             w_f8.T.contiguous().T,
             out_dtype=torch.bfloat16,
-            scale_a=x_inv_s_bf16,
-            scale_b=w_inv_s_bf16,
+            scale_a=grad_inv_s,
+            scale_b=w_inv_s,
             use_fast_accum=False,
         )
         # faster than grad_f8_t @ x_f8, for (d_out, d_in) == (50304, 768)
@@ -75,8 +73,8 @@ def mm_backward_op(g: Tensor, x_f8: Tensor, w_f8: Tensor, x_s: float, w_s: float
             x_f8.T.contiguous(),
             grad_f8.T.contiguous().T,
             out_dtype=torch.float32,
-            scale_a=x_inv_s_f32,
-            scale_b=grad_inv_s_f32,
+            scale_a=x_inv_s,
+            scale_b=grad_inv_s,
             use_fast_accum=False,
         ).T
         return grad_x, grad_w
@@ -115,8 +113,8 @@ def mobius_addition(x, y, c):
     # Compute the inner product
     inner_product = torch.sum(x * y, dim=-1, keepdim=True)
     
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    # Ensure c is on the same device as x and with the same dtype
+    c = c.to(x.device).to(x.dtype) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
     # Compute numerator and denominator following the standard formula
     numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
@@ -130,8 +128,8 @@ def mobius_addition(x, y, c):
 def scaling_factor(x, c):
     """Compute scaling factor for hyperbolic space with curvature c"""
     x_norm = torch.norm(x, dim=-1, keepdim=True)
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    # Ensure c is on the same device as x and with the same dtype
+    c = c.to(x.device).to(x.dtype) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     return 2/(1+c*x_norm**2)
 
 def expmap(x, v, c):
@@ -139,8 +137,8 @@ def expmap(x, v, c):
     scaling_factor_x = scaling_factor(x, c)
     v_norm = torch.norm(v, dim=-1, keepdim=True)
     
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    # Ensure c is on the same device as x and with the same dtype
+    c = c.to(x.device).to(x.dtype) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
     # Add small epsilon to avoid division by zero
     epsilon = 1e-8
@@ -151,8 +149,8 @@ def expmap(x, v, c):
 
 def logmap(x, u, c):
     """Logarithmic map from hyperbolic space to tangent space with curvature c"""
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    # Ensure c is on the same device as x and with the same dtype
+    c = c.to(x.device).to(x.dtype) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
     scaling_factor_x = scaling_factor(x, c)
     mob_addition = mobius_addition(-x, u, c)
@@ -326,7 +324,8 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.c = curvature
+        # Ensure curvature is a tensor with bfloat16 dtype
+        self.c = curvature if isinstance(curvature, torch.Tensor) else torch.tensor(curvature, dtype=torch.bfloat16)
         self.map_back_after_attention = map_back_after_attention
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
@@ -346,8 +345,11 @@ class CausalSelfAttention(nn.Module):
         # Calculate reference point for hyperbolic operations
         reference_point = calculate_reference_point(x)
         
+        # Ensure curvature is on same device and dtype as input
+        c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
+        
         # Map input to hyperbolic tangent space
-        x_hyperbolic = logmap(reference_point, x, self.c)
+        x_hyperbolic = logmap(reference_point, x, c)
         
         # Project to QKV
         q, k, v = F.linear(x_hyperbolic, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
@@ -370,7 +372,7 @@ class CausalSelfAttention(nn.Module):
         
         # Map back to hyperbolic space if specified
         if self.map_back_after_attention:
-            y = expmap(reference_point, y, self.c)
+            y = expmap(reference_point, y, c)
             
         return y, reference_point
 
@@ -381,8 +383,8 @@ class MLP(nn.Module):
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
         self.c_proj.weight.detach().zero_()# zero init suggested by @Grad62304977
-        # Store curvature parameter directly
-        self.c = curvature
+        # Ensure curvature is a tensor with bfloat16 dtype
+        self.c = curvature if isinstance(curvature, torch.Tensor) else torch.tensor(curvature, dtype=torch.bfloat16)
         self.map_back_after_attention = map_back_after_attention
 
     def forward(self, x: Tensor, reference_point=None):
@@ -392,7 +394,9 @@ class MLP(nn.Module):
         
         # Map back to hyperbolic space if not already done by attention
         if not self.map_back_after_attention and reference_point is not None:
-            x = expmap(reference_point, x, self.c)
+            # Ensure curvature is on same device and dtype as input
+            c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
+            x = expmap(reference_point, x, c)
             
         return x
 
@@ -402,11 +406,11 @@ class Block(nn.Module):
         
         # Handle curvature - three modes: fixed, parametric, or random
         if curvature_mode == 'fixed':
-            self.c = curvature  # Store as a float/scalar
+            self.c = torch.tensor(curvature, dtype=torch.bfloat16)  # Ensure it's a tensor with bfloat16 dtype
         elif curvature_mode == 'parametric':
-            self.c = nn.Parameter(torch.tensor(curvature))
+            self.c = nn.Parameter(torch.tensor(curvature, dtype=torch.bfloat16))
         else:  # Default to random initialization
-            self.c = nn.Parameter(torch.rand(1))
+            self.c = nn.Parameter(torch.rand(1, dtype=torch.bfloat16))
             self.c.requires_grad = True
             
         # Pass curvature parameter directly instead of just its value
