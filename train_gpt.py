@@ -1,8 +1,5 @@
 import os
 import sys
-# Set Triton configuration for shared memory limits
-os.environ["TRITON_MAX_SHARED_MEMORY"] = "90000"  # Set below hardware limit (101376)
-os.environ["TRITON_CUDAGRAPH_TREES"] = "0"  # Disable cudagraph trees to reduce memory usage
 with open(sys.argv[0]) as f:
     code = f.read() # read the code of this file ASAP, for logging
 import uuid
@@ -13,6 +10,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+# Configure shared memory limits for Triton kernels
+os.environ["PYTORCH_TRITON_MAX_SHARED_MEMORY_PER_BLOCK"] = "98304"  # Set below hardware limit
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 torch.empty(1, device="cuda", requires_grad=True).backward() # prevents a bug on some systems
@@ -302,7 +301,7 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=96, curvature=1.0, map_back_after_attention=True):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=64, curvature=1.0, map_back_after_attention=True):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -333,13 +332,13 @@ class CausalSelfAttention(nn.Module):
         q, k, v = F.linear(x_hyperbolic, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
-        
-        '''
+
+        ''' 
         if ve is not None:
             v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v) # @KoszarskyB & @Grad62304977
         else: # skip mid-layers token value embeddings by @YouJiacheng
             v = self.lambdas[0] * v
-        '''
+        '''   
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, scale=0.12).transpose(1, 2)
@@ -610,7 +609,7 @@ print0("="*100)
 #    Construct model and optimizer     #
 ########################################
 
-model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=128,
+model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, model_dim=512,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
