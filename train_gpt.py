@@ -1,5 +1,8 @@
 import os
 import sys
+# Set Triton configuration for shared memory limits
+os.environ["TRITON_MAX_SHARED_MEMORY"] = "90000"  # Set below hardware limit (101376)
+os.environ["TRITON_CUDAGRAPH_TREES"] = "0"  # Disable cudagraph trees to reduce memory usage
 with open(sys.argv[0]) as f:
     code = f.read() # read the code of this file ASAP, for logging
 import uuid
@@ -299,7 +302,7 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128, curvature=1.0, map_back_after_attention=True):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=96, curvature=1.0, map_back_after_attention=True):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
