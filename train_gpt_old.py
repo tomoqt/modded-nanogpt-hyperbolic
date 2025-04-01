@@ -623,7 +623,8 @@ for step in range(train_steps + 1):
     inputs, targets = next(train_loader)
     model(inputs, targets, get_window_size_blocks(step)).backward()
     for name, param in model.named_parameters(): # Iterate with names for potential debugging
-        dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        if param.grad is not None: # Check if gradient exists before reducing
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     # set optimization hyperparameters
     for opt in optimizers:
         for group in opt.param_groups:
