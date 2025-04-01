@@ -409,7 +409,7 @@ class Block(nn.Module):
         elif curvature_mode == 'parametric':
             self.c = nn.Parameter(torch.tensor(curvature))
         else:  # Default to random initialization
-            self.c = nn.Parameter(torch.rand(1))
+            self.c = nn.Parameter(torch.tensor(torch.rand(1),dtype=torch.bfloat16))
             self.c.requires_grad = True
             
         # Pass curvature parameter directly instead of just its value
