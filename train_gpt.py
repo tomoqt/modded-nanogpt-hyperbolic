@@ -200,7 +200,7 @@ def logmap(x, u, c):
     direction_factor = torch.where(mask.expand_as(direction_factor), torch.zeros_like(direction_factor), direction_factor)
     check_nan(direction_factor, "logmap_direction_factor")
     
-    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)  # Single-line fix
+    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.9, max=0.9)  # Single-line fix
     check_nan(arg, "logmap_arg")
     
     arctanh = torch.arctanh(arg)
