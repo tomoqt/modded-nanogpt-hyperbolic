@@ -421,6 +421,12 @@ class Block(nn.Module):
         if self.attn is not None:
             attn_output, reference_point = self.attn(norm(x), ve, block_mask)
             x = x + attn_output
+        else:
+            # When attention is skipped, calculate reference point and map to hyperbolic space here
+            reference_point = calculate_reference_point(x)
+            # Ensure curvature is on same device and dtype as input
+            c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
+            x = logmap(reference_point, x, c)
             
         mlp_output = self.mlp(norm(x), reference_point)
         x = x + mlp_output
