@@ -437,7 +437,7 @@ class CausalSelfAttention(nn.Module):
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, scale=0.12).transpose(1, 2)
-        check_nan(y, "attention_output", print_tensor=True)
+        check_nan(y, "attention_output", print_tensor=False)
         
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
         
@@ -448,7 +448,7 @@ class CausalSelfAttention(nn.Module):
         # Map back to hyperbolic space if specified - use curvature parameter directly
         if (not self.disable_hyperbolic_ops) and self.map_back_after_attention:
             y = expmap(reference_point, y, self.c)
-            check_nan(y, "hyperbolic_attention_output", print_tensor=True)
+            check_nan(y, "hyperbolic_attention_output", print_tensor=False)
             
         return y, reference_point
 
@@ -477,7 +477,7 @@ class MLP(nn.Module):
 
         if (not self.disable_hyperbolic_ops) and (not self.map_back_after_attention) and reference_point is not None:
             x = expmap(reference_point, x, self.c)
-            check_nan(x, "hyperbolic_mlp_output", print_tensor=True)
+            check_nan(x, "hyperbolic_mlp_output", print_tensor=False)
 
         return x
 
@@ -521,13 +521,13 @@ class Block(nn.Module):
                 # Ensure curvature is on same device and dtype as input
                 c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
                 x = logmap(reference_point, x, c)
-                check_nan(x, "logmap_output_no_attn", print_tensor=True)
+                check_nan(x, "logmap_output_no_attn", print_tensor=False)
             
         mlp_output = self.mlp(norm(x), reference_point)
         check_nan(mlp_output, "mlp_output")
         
         x = x + mlp_output
-        check_nan(x, "block_output", print_tensor=True)
+        check_nan(x, "block_output", print_tensor=False)
         
         return x
 
@@ -619,7 +619,7 @@ class GPT(nn.Module):
         assert len(block_masks) == len(self.blocks)
 
         x = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
-        check_nan(x, "initial_embedding", print_tensor=True)
+        check_nan(x, "initial_embedding", print_tensor=False)
 
         # U-net design by @brendanh0gan
         skip_connections = []
@@ -634,7 +634,7 @@ class GPT(nn.Module):
             
             block_name = f"block_{i}"
             x = self.blocks[i](x, block_masks[i])
-            if check_nan(x, f"after_{block_name}", print_tensor=True):
+            if check_nan(x, f"after_{block_name}", print_tensor=False):
                 print(f"NaN detected after {block_name}!")
             
             if i < n:
@@ -651,7 +651,7 @@ class GPT(nn.Module):
         check_nan(logits, "softcapped_logits")
         
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, reduction='sum' if self.training else 'mean')
-        if check_nan(loss, "loss", print_tensor=True):
+        if check_nan(loss, "loss", print_tensor=False):
             print("NaN detected in loss! Printing model parameters with NaN:")
             for name, param in self.named_parameters():
                 if check_nan(param, name):
