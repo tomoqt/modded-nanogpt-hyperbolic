@@ -389,12 +389,13 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=64, curvature=1.0, map_back_after_attention=True):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=64, curvature=1.0, map_back_after_attention=True, disable_hyperbolic_ops=False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.c = curvature
         self.map_back_after_attention = map_back_after_attention
+        self.disable_hyperbolic_ops = disable_hyperbolic_ops
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
         bound = (3 ** 0.5) * std # improved init scale by @YouJiacheng
@@ -409,16 +410,15 @@ class CausalSelfAttention(nn.Module):
         B, T = x.size(0), x.size(1) # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
 
-        # NaN check on input
         check_nan(x, "attention_input")
-
-        # Calculate reference point for hyperbolic operations
-        reference_point = calculate_reference_point(x)
-        check_nan(reference_point, "reference_point")
-        
-        # Map input to hyperbolic tangent space - use curvature parameter directly
-        x_hyperbolic = logmap(reference_point, x, self.c)
-        check_nan(x_hyperbolic, "x_hyperbolic")
+        if self.disable_hyperbolic_ops:
+            reference_point = None
+            x_hyperbolic = x
+        else:
+            reference_point = calculate_reference_point(x)
+            check_nan(reference_point, "reference_point")
+            x_hyperbolic = logmap(reference_point, x, self.c)
+            check_nan(x_hyperbolic, "x_hyperbolic")
         
         # Project to QKV
         q, k, v = F.linear(x_hyperbolic, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
@@ -446,7 +446,7 @@ class CausalSelfAttention(nn.Module):
         check_nan(y, "projected_attention_output")
         
         # Map back to hyperbolic space if specified - use curvature parameter directly
-        if self.map_back_after_attention:
+        if (not self.disable_hyperbolic_ops) and self.map_back_after_attention:
             y = expmap(reference_point, y, self.c)
             check_nan(y, "hyperbolic_attention_output", print_tensor=True)
             
@@ -483,7 +483,7 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, curvature_mode='random', curvature=1.0, map_back_after_attention=True):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, curvature_mode='random', curvature=1.0, map_back_after_attention=True, disable_hyperbolic_ops=False):
         super().__init__()
         
         # Handle curvature - three modes: fixed, parametric, or random
@@ -496,9 +496,10 @@ class Block(nn.Module):
             self.c.requires_grad = True
             
         # Pass curvature parameter directly instead of just its value
-        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
+        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention, disable_hyperbolic_ops=disable_hyperbolic_ops) if layer_idx != 7 else None
         self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention)
         self.map_back_after_attention = map_back_after_attention
+        self.disable_hyperbolic_ops = disable_hyperbolic_ops
 
     def forward(self, x: Tensor, block_mask: BlockMask):
         check_nan(x, f"block_input")
@@ -536,7 +537,7 @@ def next_multiple_of_n(v: float | int, *, n: int):
 
 class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int, 
-                 curvature_mode='random', curvature=1.0, map_back_after_attention=True):
+                 curvature_mode='random', curvature=1.0, map_back_after_attention=True, disable_hyperbolic_ops=False):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
         
@@ -544,15 +545,18 @@ class GPT(nn.Module):
         self.curvature_mode = curvature_mode
         self.curvature = curvature
         self.map_back_after_attention = map_back_after_attention
+        self.disable_hyperbolic_ops = disable_hyperbolic_ops
         
         # Initialize blocks with hyperbolic parameters
         self.blocks = nn.ModuleList([
             Block(model_dim, num_heads, max_seq_len, i, 
                   curvature_mode=curvature_mode, 
                   curvature=curvature,
-                  map_back_after_attention=map_back_after_attention) 
-            for i in range(num_layers)
-        ])
+                  map_back_after_attention=map_back_after_attention,
+                  disable_hyperbolic_ops=disable_hyperbolic_ops
+             ) 
+             for i in range(num_layers)
+         ])
         
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
@@ -706,6 +710,7 @@ class Hyperparameters:
     # evaluation and logging
     val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
+    disable_hyperbolic_ops = False
 args = Hyperparameters()
 
 # torchrun sets these env variables
@@ -753,8 +758,11 @@ model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, m
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
-                       map_back_after_attention=args.map_back_after_attention).cuda()
-
+                       map_back_after_attention=args.map_back_after_attention,
+                       disable_hyperbolic_ops=args.disable_hyperbolic_ops).cuda()
+for m in model.modules():
+    if isinstance(m, nn.Embedding):
+        m.bfloat16()
 for param in model.parameters():
     dist.broadcast(param.detach(), 0)
 
