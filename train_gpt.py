@@ -117,13 +117,14 @@ def mobius_addition(x, y, c):
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
+    # Create epsilon as bfloat16 tensor
+    epsilon = torch.tensor(1e-8, device=x.device, dtype=torch.bfloat16)
+    
     # Compute numerator and denominator following the standard formula
     numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
                 (1 - c * (x_norm ** 2)) * y
     denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
     
-    # Add small epsilon to avoid division by zero
-    epsilon = 1e-8
     return numerator / (denominator + epsilon)
 
 def scaling_factor(x, c):
@@ -141,8 +142,9 @@ def expmap(x, v, c):
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
-    # Add small epsilon to avoid division by zero
-    epsilon = 1e-8
+    # Create epsilon as bfloat16 tensor
+    epsilon = torch.tensor(1e-8, device=x.device, dtype=torch.bfloat16)
+    
     # Safe division with epsilon
     safe_v_norm = v_norm + epsilon
     second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/safe_v_norm
@@ -156,8 +158,10 @@ def logmap(x, u, c):
     scaling_factor_x = scaling_factor(x, c)
     mob_addition = mobius_addition(-x, u, c)
     addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
-    # Add small epsilon to avoid division by zero
-    epsilon = 1e-8  
+    
+    # Create epsilon as bfloat16 tensor
+    epsilon = torch.tensor(1e-8, device=x.device, dtype=torch.bfloat16)
+    
     constant_factor = 2 / (scaling_factor_x * c**0.5 + epsilon)
     direction_factor = mob_addition / (addition_norm + epsilon)
     arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)
