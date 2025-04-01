@@ -119,38 +119,97 @@ def mobius_addition(x, y, c):
     """Mobius addition in hyperbolic space with curvature c"""
     # Compute norms
     x_norm = torch.norm(x, dim=-1, keepdim=True)
+    check_nan(x_norm, "mobius_addition_x_norm")
     y_norm = torch.norm(y, dim=-1, keepdim=True)
+    check_nan(y_norm, "mobius_addition_y_norm")
+    
     # Compute the inner product
     inner_product = torch.sum(x * y, dim=-1, keepdim=True)
+    check_nan(inner_product, "mobius_addition_inner_product")
     
     # Compute numerator and denominator following the standard formula
     numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
                 (1 - c * (x_norm ** 2)) * y
-    denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
+    check_nan(numerator, "mobius_addition_numerator")
     
-    return numerator / denominator
+    denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
+    check_nan(denominator, "mobius_addition_denominator")
+    
+    result = numerator / denominator
+    check_nan(result, "mobius_addition_result")
+    
+    return result
 
 def scaling_factor(x, c):
     """Compute scaling factor for hyperbolic space with curvature c"""
     x_norm = torch.norm(x, dim=-1, keepdim=True)
-    return 2/(1+c*x_norm**2)
+    check_nan(x_norm, "scaling_factor_x_norm")
+    
+    result = 2/(1+c*x_norm**2)
+    check_nan(result, "scaling_factor_result")
+    
+    return result
 
 def expmap(x, v, c):
     """Exponential map from tangent space to hyperbolic space with curvature c"""
     scaling_factor_x = scaling_factor(x, c)
+    check_nan(scaling_factor_x, "expmap_scaling_factor")
+    
     v_norm = torch.norm(v, dim=-1, keepdim=True)
-    second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/v_norm
-    return mobius_addition(x, second_term, c)
+    check_nan(v_norm, "expmap_v_norm")
+    
+    # Handle zero norm case to avoid division by zero
+    mask = v_norm == 0
+    safe_v_norm = v_norm.clone()
+    safe_v_norm[mask] = 1.0
+    
+    tanh_term = (c*scaling_factor_x*v_norm**2/2)**0.5
+    check_nan(tanh_term, "expmap_tanh_term")
+    
+    second_term = (1/c**0.5)*torch.tanh(tanh_term)*v/safe_v_norm
+    # Set second_term to 0 where v_norm is 0
+    second_term = torch.where(mask.expand_as(second_term), torch.zeros_like(second_term), second_term)
+    check_nan(second_term, "expmap_second_term")
+    
+    result = mobius_addition(x, second_term, c)
+    check_nan(result, "expmap_result")
+    
+    return result
 
 def logmap(x, u, c):
     """Logarithmic map from hyperbolic space to tangent space with curvature c"""
     scaling_factor_x = scaling_factor(x, c)
+    check_nan(scaling_factor_x, "logmap_scaling_factor")
+    
     mob_addition = mobius_addition(-x, u, c)
+    check_nan(mob_addition, "logmap_mob_addition")
+    
     addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
+    check_nan(addition_norm, "logmap_addition_norm")
+    
+    # Handle zero norm case
+    mask = addition_norm == 0
+    safe_addition_norm = addition_norm.clone()
+    safe_addition_norm[mask] = 1.0
+    
     constant_factor = 2 / (scaling_factor_x * c**0.5)
-    direction_factor = mob_addition / addition_norm
+    check_nan(constant_factor, "logmap_constant_factor")
+    
+    direction_factor = mob_addition / safe_addition_norm
+    # Set direction_factor to 0 where addition_norm is 0
+    direction_factor = torch.where(mask.expand_as(direction_factor), torch.zeros_like(direction_factor), direction_factor)
+    check_nan(direction_factor, "logmap_direction_factor")
+    
     arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)  # Single-line fix
-    return constant_factor * torch.arctanh(arg) * direction_factor
+    check_nan(arg, "logmap_arg")
+    
+    arctanh = torch.arctanh(arg)
+    check_nan(arctanh, "logmap_arctanh")
+    
+    result = constant_factor * arctanh * direction_factor
+    check_nan(result, "logmap_result")
+    
+    return result
 
 def calculate_reference_point(x):
     """Calculate reference point for hyperbolic operations"""
@@ -159,6 +218,8 @@ def calculate_reference_point(x):
     if T > 1:
         ref_point = x[:, :-1, :]
         ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
+    
+    check_nan(ref_point, "calculated_reference_point")
     return ref_point
 
 # -----------------------------------------------------------------------------
@@ -345,9 +406,11 @@ class CausalSelfAttention(nn.Module):
             c = self.c
             if isinstance(c, torch.Tensor):
                 c = c.to(x.device).to(x.dtype)
+                check_nan(c, "curvature_tensor")
             else:
                 c = torch.tensor(c, device=x.device, dtype=x.dtype)
             
+            # Log map from hyperbolic space to tangent space
             x_hyperbolic = logmap(reference_point, x, c)
             check_nan(x_hyperbolic, "x_hyperbolic")
         
@@ -382,9 +445,11 @@ class CausalSelfAttention(nn.Module):
             c = self.c
             if isinstance(c, torch.Tensor):
                 c = c.to(y.device).to(y.dtype)
+                check_nan(c, "curvature_tensor_map_back")
             else:
                 c = torch.tensor(c, device=y.device, dtype=y.dtype)
             
+            # Exponential map from tangent space to hyperbolic space
             y = expmap(reference_point, y, c)
             check_nan(y, "hyperbolic_attention_output", print_tensor=False)
         
@@ -418,9 +483,14 @@ class MLP(nn.Module):
             c = self.c
             if isinstance(c, torch.Tensor):
                 c = c.to(x.device).to(x.dtype)
+                check_nan(c, "mlp_curvature_tensor")
             else:
                 c = torch.tensor(c, device=x.device, dtype=x.dtype)
             
+            # Check reference point for NaN
+            check_nan(reference_point, "mlp_reference_point")
+            
+            # Exponential map from tangent space to hyperbolic space
             x = expmap(reference_point, x, c)
             check_nan(x, "hyperbolic_mlp_output", print_tensor=False)
 
@@ -469,9 +539,11 @@ class Block(nn.Module):
                 c = self.c
                 if isinstance(c, torch.Tensor):
                     c = c.to(x.device).to(x.dtype)
+                    check_nan(c, "block_curvature_tensor_no_attn")
                 else:
                     c = torch.tensor(c, device=x.device, dtype=x.dtype)
                 
+                # Log map from hyperbolic space to tangent space
                 x = logmap(reference_point, x, c)
                 check_nan(x, "logmap_output_no_attn", print_tensor=False)
             
