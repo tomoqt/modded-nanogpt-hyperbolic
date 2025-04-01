@@ -691,7 +691,6 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank : in
 
 # -----------------------------------------------------------------------------
 # int main
-
 @dataclass
 class Hyperparameters:
     # data
