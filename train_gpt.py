@@ -391,12 +391,11 @@ class CausalSelfAttention(nn.Module):
         # merged QKV weights: suggested by many, implemented by @fernbear.bsky.social, and further improved by @YouJiacheng
         # https://x.com/hi_tysam/status/1879699187107033311
         self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
-        self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
         self.rotary = Rotary(head_dim, max_seq_len)
         self.c_proj = CastedLinear(hdim, dim)
         self.c_proj.weight.detach().zero_() # zero init suggested by @Grad62304977
 
-    def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
+    def forward(self, x: Tensor, block_mask: BlockMask):
         B, T = x.size(0), x.size(1) # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
 
@@ -410,22 +409,6 @@ class CausalSelfAttention(nn.Module):
         q, k, v = F.linear(x_hyperbolic, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
-
-        ''' 
-        # Value embeddings functionality commented out
-        if ve is not None:
-            # Map value embeddings to hyperbolic tangent space if they aren't already
-            ve_hyperbolic = logmap(reference_point, ve, self.c)
-            # Reshape to match v's shape
-            ve_shaped = ve_hyperbolic.view_as(v)
-            # Combine with weighted sum
-            v = self.lambdas[0] * v + self.lambdas[1] * ve_shaped
-        else:
-            # Skip mid-layers token value embeddings
-            v = self.lambdas[0] * v
-        '''   
-        # Just use base v without value embeddings
-        v = self.lambdas[0] * v
         
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
@@ -479,15 +462,13 @@ class Block(nn.Module):
         # Pass curvature parameter directly instead of just its value
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention) if layer_idx != 7 else None
         self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention)
-        self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
         self.map_back_after_attention = map_back_after_attention
 
-    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
-        x = self.lambdas[0] * x + self.lambdas[1] * x0
+    def forward(self, x: Tensor, block_mask: BlockMask):
         reference_point = None
         
         if self.attn is not None:
-            attn_output, reference_point = self.attn(norm(x), ve, block_mask)
+            attn_output, reference_point = self.attn(norm(x), block_mask)
             x = x + attn_output
         else:
             # When attention is skipped, calculate reference point and map to hyperbolic space here
@@ -501,20 +482,6 @@ class Block(nn.Module):
         
         return x
 
-class ValueEmbedding(nn.Module):
-    def __init__(self, vocab_size, model_dim, curvature=1.0):
-        super().__init__()
-        self.embed = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        self.c = curvature
-
-    def forward(self, inputs, reference_point=None):
-        ve = [emb(inputs) for emb in self.embed]
-        # Map value embeddings to hyperbolic space if reference point is provided
-        if reference_point is not None:
-            ve = [expmap(reference_point, v, self.c) for v in ve]
-        ve = [ve[0], ve[1], ve[2], None, None, None, None, None, None, ve[0], ve[1], ve[2]]
-        return ve
-
 # -----------------------------------------------------------------------------
 # The main model
 
@@ -526,11 +493,6 @@ class GPT(nn.Module):
                  curvature_mode='random', curvature=1.0, map_back_after_attention=True):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
-        # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
-        # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
-        '''
-        self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        '''
         
         # Store hyperbolic parameters for blocks
         self.curvature_mode = curvature_mode
@@ -598,20 +560,11 @@ class GPT(nn.Module):
     def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor):
         assert input_seq.ndim == 1
 
-        '''
-        ve = [value_embed(input_seq) for value_embed in self.value_embeds]
-        # 012 ... 012 structure on token value embeddings by @YouJiacheng, improved on @leloykun's U-net structure
-        ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
-        assert len(ve) == len(self.blocks)
-        '''
-        # Use None for all value embeddings
-        ve = [None] * len(self.blocks)
-
         long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
         block_masks = [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
         assert len(block_masks) == len(self.blocks)
 
-        x = x0 = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
+        x = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
 
         # U-net design by @brendanh0gan
         skip_connections = []
@@ -619,7 +572,7 @@ class GPT(nn.Module):
         for i in range(len(self.blocks)):
             if i >= n:
                 x = x + self.skip_weights[i - n] * skip_connections.pop()
-            x = self.blocks[i](x, ve[i], x0, block_masks[i])
+            x = self.blocks[i](x, block_masks[i])
             if i < n:
                 skip_connections.append(x)
 
