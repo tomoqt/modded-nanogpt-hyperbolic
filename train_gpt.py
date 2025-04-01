@@ -827,6 +827,40 @@ del initial_state
 #        Training and validation       #
 ########################################
 
+# Add NaN detection in backward pass
+def train_with_nan_checks(model, inputs, targets, sliding_window_num_blocks, optimizers):
+    # Forward pass
+    loss = model(inputs, targets, sliding_window_num_blocks)
+    
+    # Backward pass
+    loss.backward()
+    
+    # Check for NaNs in gradients
+    nan_in_grads = False
+    for name, param in model.named_parameters():
+        if param.grad is not None and check_nan(param.grad, f"grad_{name}"):
+            print(f"NaN detected in gradient for {name}")
+            nan_in_grads = True
+    
+    if nan_in_grads:
+        print("NaN detected in gradients. Skipping optimizer step.")
+        model.zero_grad(set_to_none=True)
+        return loss
+    
+    # Reduce gradients
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+    
+    # Update weights
+    for opt in optimizers:
+        opt.step()
+    
+    # Null the gradients
+    model.zero_grad(set_to_none=True)
+    
+    return loss
+
 train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
 training_time_ms = 0
 # start the clock
@@ -899,40 +933,10 @@ for step in range(train_steps + 1):
         # null the gradients
         model.zero_grad(set_to_none=True)
 
+    # logging
+    approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
+    print0(f"step:{step+1}/{train_steps} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
+
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 dist.destroy_process_group()
-
-# Add NaN detection in backward pass
-def train_with_nan_checks(model, inputs, targets, sliding_window_num_blocks, optimizers):
-    # Forward pass
-    loss = model(inputs, targets, sliding_window_num_blocks)
-    
-    # Backward pass
-    loss.backward()
-    
-    # Check for NaNs in gradients
-    nan_in_grads = False
-    for name, param in model.named_parameters():
-        if param.grad is not None and check_nan(param.grad, f"grad_{name}"):
-            print(f"NaN detected in gradient for {name}")
-            nan_in_grads = True
-    
-    if nan_in_grads:
-        print("NaN detected in gradients. Skipping optimizer step.")
-        model.zero_grad(set_to_none=True)
-        return loss
-    
-    # Reduce gradients
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-    
-    # Update weights
-    for opt in optimizers:
-        opt.step()
-    
-    # Null the gradients
-    model.zero_grad(set_to_none=True)
-    
-    return loss
