@@ -509,7 +509,7 @@ class Block(nn.Module):
             self.c = nn.Parameter(torch.tensor(curvature))
         else:  # Default to random initialization
             # Initialize to a random value
-            random_c = torch.rand(1)
+            random_c = torch.rand(1) + 0.1  # Ensure it's at least 0.1
             self.c = nn.Parameter(random_c.to(dtype=torch.bfloat16))
             self.c.requires_grad = True
             
