@@ -453,33 +453,32 @@ class CausalSelfAttention(nn.Module):
         return y, reference_point
 
 class MLP(nn.Module):
-    def __init__(self, dim: int, curvature=1.0, map_back_after_attention=True):
+    def __init__(self, dim: int, curvature=1.0, map_back_after_attention=True, disable_hyperbolic_ops=False):
         super().__init__()
         hdim = 4 * dim
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
-        self.c_proj.weight.detach().zero_()# zero init suggested by @Grad62304977
-        # Store curvature parameter directly
+        self.c_proj.weight.detach().zero_()  # zero init suggested by @Grad62304977
         self.c = curvature
         self.map_back_after_attention = map_back_after_attention
+        self.disable_hyperbolic_ops = disable_hyperbolic_ops
 
     def forward(self, x: Tensor, reference_point=None):
         check_nan(x, "mlp_input")
-        
+
         x = self.c_fc(x)
         check_nan(x, "mlp_fc_output")
-        
-        x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+
+        x = F.relu(x).square()  # ~1-2% better than GELU as suggested
         check_nan(x, "mlp_activation_output")
-        
+
         x = self.c_proj(x)
         check_nan(x, "mlp_proj_output")
-        
-        # Map back to hyperbolic space if not already done by attention - use curvature parameter directly
-        if not self.map_back_after_attention and reference_point is not None:
+
+        if (not self.disable_hyperbolic_ops) and (not self.map_back_after_attention) and reference_point is not None:
             x = expmap(reference_point, x, self.c)
             check_nan(x, "hyperbolic_mlp_output", print_tensor=True)
-            
+
         return x
 
 class Block(nn.Module):
@@ -497,7 +496,7 @@ class Block(nn.Module):
             
         # Pass curvature parameter directly instead of just its value
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c, map_back_after_attention=map_back_after_attention, disable_hyperbolic_ops=disable_hyperbolic_ops) if layer_idx != 7 else None
-        self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention)
+        self.mlp = MLP(dim, curvature=self.c, map_back_after_attention=map_back_after_attention, disable_hyperbolic_ops=disable_hyperbolic_ops)
         self.map_back_after_attention = map_back_after_attention
         self.disable_hyperbolic_ops = disable_hyperbolic_ops
 
@@ -512,14 +511,17 @@ class Block(nn.Module):
             x = x + attn_output
             check_nan(x, "post_attention_block_state")
         else:
-            # When attention is skipped, calculate reference point and map to hyperbolic space here
-            reference_point = calculate_reference_point(x)
-            check_nan(reference_point, "reference_point_no_attn")
-            
-            # Ensure curvature is on same device and dtype as input
-            c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
-            x = logmap(reference_point, x, c)
-            check_nan(x, "logmap_output_no_attn", print_tensor=True)
+            if self.disable_hyperbolic_ops:
+                reference_point = None
+            else:
+                # When attention is skipped, calculate reference point and map to hyperbolic space here
+                reference_point = calculate_reference_point(x)
+                check_nan(reference_point, "reference_point_no_attn")
+                
+                # Ensure curvature is on same device and dtype as input
+                c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
+                x = logmap(reference_point, x, c)
+                check_nan(x, "logmap_output_no_attn", print_tensor=True)
             
         mlp_output = self.mlp(norm(x), reference_point)
         check_nan(mlp_output, "mlp_output")
@@ -710,7 +712,7 @@ class Hyperparameters:
     # evaluation and logging
     val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
-    disable_hyperbolic_ops = False
+    disable_hyperbolic_ops = True
 args = Hyperparameters()
 
 # torchrun sets these env variables
