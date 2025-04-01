@@ -29,6 +29,8 @@ def check_nan(tensor, name="unnamed_tensor", print_tensor=False):
         if print_tensor:
             print(f"{name} shape: {tensor.shape}")
             print(f"{name} values:\n{tensor}")
+        # Raise exception to stop execution at the first NaN
+        raise RuntimeError(f"STOPPING: NaN detected in {name}")
         return True
     return False
 
