@@ -416,6 +416,7 @@ class CausalSelfAttention(nn.Module):
             x_hyperbolic = x
         else:
             reference_point = calculate_reference_point(x)
+            print(x)
             check_nan(reference_point, "reference_point")
             x_hyperbolic = logmap(reference_point, x, self.c)
             check_nan(x_hyperbolic, "x_hyperbolic")
