@@ -115,143 +115,51 @@ mm_op.register_autograd(backward, setup_context=setup_context)
 
 # -----------------------------------------------------------------------------
 # Hyperbolic geometry utility functions
-
 def mobius_addition(x, y, c):
     """Mobius addition in hyperbolic space with curvature c"""
-    # Add safety check
-    if torch.isnan(x).any() or torch.isnan(y).any():
-        print("Warning: NaN detected in mobius_addition input")
-        return x
-        
     # Compute norms
     x_norm = torch.norm(x, dim=-1, keepdim=True)
     y_norm = torch.norm(y, dim=-1, keepdim=True)
     # Compute the inner product
     inner_product = torch.sum(x * y, dim=-1, keepdim=True)
     
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
-    
-    # Clamp the curvature to prevent NaN issues
-    c = torch.clamp(c, min=1e-5, max=1.0)
-    
-    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
-    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
-    
     # Compute numerator and denominator following the standard formula
     numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
                 (1 - c * (x_norm ** 2)) * y
     denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
     
-    # Safeguard against division by very small values
-    safe_denominator = torch.clamp(denominator, min=epsilon)
-    result = numerator / safe_denominator
-    
-    # Final safety check
-    if torch.isnan(result).any():
-        print("Warning: NaN detected in mobius_addition output")
-        return x
-    
-    return result
+    return numerator / denominator
 
 def scaling_factor(x, c):
     """Compute scaling factor for hyperbolic space with curvature c"""
     x_norm = torch.norm(x, dim=-1, keepdim=True)
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
-    
-    # Clamp the curvature to prevent NaN issues
-    c = torch.clamp(c, min=1e-5, max=1.0)
-    
     return 2/(1+c*x_norm**2)
 
 def expmap(x, v, c):
     """Exponential map from tangent space to hyperbolic space with curvature c"""
-    # Add safety check
-    if torch.isnan(x).any() or torch.isnan(v).any():
-        print("Warning: NaN detected in expmap input")
-        return x
-    
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
-    
-    # Clamp the curvature to prevent NaN issues
-    c = torch.clamp(c, min=1e-5, max=1.0)
-    
     scaling_factor_x = scaling_factor(x, c)
     v_norm = torch.norm(v, dim=-1, keepdim=True)
-    
-    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
-    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
-    
-    # Safe division with epsilon
-    safe_v_norm = v_norm + epsilon
-    
-    # Use clamp for safer operations
-    arg = torch.clamp(c*scaling_factor_x*v_norm**2/2, min=0.0, max=8.0)**0.5
-    second_term = (1/c**0.5)*torch.tanh(arg)*v/safe_v_norm
-    
-    result = mobius_addition(x, second_term, c)
-    
-    # Final safety check
-    if torch.isnan(result).any():
-        print("Warning: NaN detected in expmap output")
-        return x
-    
-    return result
+    second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/v_norm
+    return mobius_addition(x, second_term, c)
 
 def logmap(x, u, c):
     """Logarithmic map from hyperbolic space to tangent space with curvature c"""
-    # Ensure c is on the same device as x
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
-    
-    # Clamp the curvature to prevent NaN issues
-    c = torch.clamp(c, min=1e-5, max=1.0)
-    
-    # Add safety check
-    if torch.isnan(x).any() or torch.isnan(u).any():
-        print("Warning: NaN detected in logmap input")
-        return torch.zeros_like(u)
-    
     scaling_factor_x = scaling_factor(x, c)
     mob_addition = mobius_addition(-x, u, c)
     addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
-    
-    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
-    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
-    
-    constant_factor = 2 / (scaling_factor_x * c**0.5 + epsilon)
-    direction_factor = mob_addition / (addition_norm + epsilon)
-    
-    # More conservative clamping to avoid issues with arctanh
-    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.99, max=0.99)
-    result = constant_factor * torch.arctanh(arg) * direction_factor
-    
-    # Final safety check
-    if torch.isnan(result).any():
-        print("Warning: NaN detected in logmap output")
-        return torch.zeros_like(u)
-    
-    return result
+    constant_factor = 2 / (scaling_factor_x * c**0.5)
+    direction_factor = mob_addition / addition_norm
+    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)  # Single-line fix
+    return constant_factor * torch.arctanh(arg) * direction_factor
 
 def calculate_reference_point(x):
     """Calculate reference point for hyperbolic operations"""
     B, T, C = x.size()
-    # Create a fixed origin point (zeros) as fallback reference
-    origin = torch.zeros_like(x[:, :1, :])
-    
+    ref_point = torch.zeros_like(x[:, :1, :])
     if T > 1:
-        # Get previous tokens as reference points
         ref_point = x[:, :-1, :]
         ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
-        
-        # Check for potential NaN values
-        if torch.isnan(ref_point).any():
-            print("Warning: NaN detected in reference point calculation, using origin instead")
-            return origin
-            
-        return ref_point
-    return origin
+    return ref_point
 
 # -----------------------------------------------------------------------------
 # Muon optimizer
@@ -422,15 +330,25 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x: Tensor, block_mask: BlockMask):
         B, T = x.size(0), x.size(1) # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
-
+        
         check_nan(x, "attention_input")
+        
         if self.disable_hyperbolic_ops:
             reference_point = None
             x_hyperbolic = x
         else:
+            # Get reference point
             reference_point = calculate_reference_point(x)
             check_nan(reference_point, "reference_point")
-            x_hyperbolic = logmap(reference_point, x, self.c)
+            
+            # Ensure curvature is properly formatted
+            c = self.c
+            if isinstance(c, torch.Tensor):
+                c = c.to(x.device).to(x.dtype)
+            else:
+                c = torch.tensor(c, device=x.device, dtype=x.dtype)
+            
+            x_hyperbolic = logmap(reference_point, x, c)
             check_nan(x_hyperbolic, "x_hyperbolic")
         
         # Project to QKV
@@ -460,9 +378,16 @@ class CausalSelfAttention(nn.Module):
         
         # Map back to hyperbolic space if specified - use curvature parameter directly
         if (not self.disable_hyperbolic_ops) and self.map_back_after_attention:
-            y = expmap(reference_point, y, self.c)
-            check_nan(y, "hyperbolic_attention_output", print_tensor=False)
+            # Ensure c is still in a safe range
+            c = self.c
+            if isinstance(c, torch.Tensor):
+                c = c.to(y.device).to(y.dtype)
+            else:
+                c = torch.tensor(c, device=y.device, dtype=y.dtype)
             
+            y = expmap(reference_point, y, c)
+            check_nan(y, "hyperbolic_attention_output", print_tensor=False)
+        
         return y, reference_point
 
 class MLP(nn.Module):
@@ -489,7 +414,14 @@ class MLP(nn.Module):
         check_nan(x, "mlp_proj_output")
 
         if (not self.disable_hyperbolic_ops) and (not self.map_back_after_attention) and reference_point is not None:
-            x = expmap(reference_point, x, self.c)
+            # Ensure curvature is on same device and dtype as input
+            c = self.c
+            if isinstance(c, torch.Tensor):
+                c = c.to(x.device).to(x.dtype)
+            else:
+                c = torch.tensor(c, device=x.device, dtype=x.dtype)
+            
+            x = expmap(reference_point, x, c)
             check_nan(x, "hyperbolic_mlp_output", print_tensor=False)
 
         return x
@@ -504,7 +436,9 @@ class Block(nn.Module):
         elif curvature_mode == 'parametric':
             self.c = nn.Parameter(torch.tensor(curvature))
         else:  # Default to random initialization
-            self.c = nn.Parameter(torch.tensor(torch.rand(1),dtype=torch.bfloat16))
+            # Initialize to a random value
+            random_c = torch.rand(1)
+            self.c = nn.Parameter(random_c.to(dtype=torch.bfloat16))
             self.c.requires_grad = True
             
         # Pass curvature parameter directly instead of just its value
@@ -532,7 +466,12 @@ class Block(nn.Module):
                 check_nan(reference_point, "reference_point_no_attn")
                 
                 # Ensure curvature is on same device and dtype as input
-                c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
+                c = self.c
+                if isinstance(c, torch.Tensor):
+                    c = c.to(x.device).to(x.dtype)
+                else:
+                    c = torch.tensor(c, device=x.device, dtype=x.dtype)
+                
                 x = logmap(reference_point, x, c)
                 check_nan(x, "logmap_output_no_attn", print_tensor=False)
             
@@ -558,7 +497,10 @@ class GPT(nn.Module):
         
         # Store hyperbolic parameters for blocks
         self.curvature_mode = curvature_mode
+        
+        # Store curvature value directly
         self.curvature = curvature
+        
         self.map_back_after_attention = map_back_after_attention
         self.disable_hyperbolic_ops = disable_hyperbolic_ops
         
@@ -566,7 +508,7 @@ class GPT(nn.Module):
         self.blocks = nn.ModuleList([
             Block(model_dim, num_heads, max_seq_len, i, 
                   curvature_mode=curvature_mode, 
-                  curvature=curvature,
+                  curvature=self.curvature,
                   map_back_after_attention=map_back_after_attention,
                   disable_hyperbolic_ops=disable_hyperbolic_ops
              ) 
@@ -664,11 +606,7 @@ class GPT(nn.Module):
         check_nan(logits, "softcapped_logits")
         
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, reduction='sum' if self.training else 'mean')
-        if check_nan(loss, "loss", print_tensor=False):
-            print("NaN detected in loss! Printing model parameters with NaN:")
-            for name, param in self.named_parameters():
-                if check_nan(param, name):
-                    print(f"NaN in parameter: {name}, shape: {param.shape}")
+        check_nan(loss, "loss", print_tensor=False)
         
         return loss
 
@@ -847,7 +785,7 @@ del initial_state
 #        Training and validation       #
 ########################################
 
-# Add NaN detection in backward pass
+# Replace train_with_nan_checks with a simpler version that doesn't sanitize NaNs
 def train_with_nan_checks(model, inputs, targets, sliding_window_num_blocks, optimizers):
     # Forward pass
     loss = model(inputs, targets, sliding_window_num_blocks)
@@ -855,17 +793,10 @@ def train_with_nan_checks(model, inputs, targets, sliding_window_num_blocks, opt
     # Backward pass
     loss.backward()
     
-    # Check for NaNs in gradients
-    nan_in_grads = False
+    # Check for NaNs in gradients but don't change behavior based on it
     for name, param in model.named_parameters():
-        if param.grad is not None and check_nan(param.grad, f"grad_{name}"):
-            print(f"NaN detected in gradient for {name}")
-            nan_in_grads = True
-    
-    if nan_in_grads:
-        print("NaN detected in gradients. Skipping optimizer step.")
-        model.zero_grad(set_to_none=True)
-        return loss
+        if param.grad is not None:
+            check_nan(param.grad, f"grad_{name}")
     
     # Reduce gradients
     for name, param in model.named_parameters():
