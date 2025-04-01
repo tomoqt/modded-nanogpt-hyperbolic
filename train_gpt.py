@@ -22,6 +22,16 @@ import torch.distributed as dist
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
 #torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 
+# NaN detection helper function
+def check_nan(tensor, name="unnamed_tensor", print_tensor=False):
+    if torch.isnan(tensor).any():
+        print(f"NaN detected in {name}!")
+        if print_tensor:
+            print(f"{name} shape: {tensor.shape}")
+            print(f"{name} values:\n{tensor}")
+        return True
+    return False
+
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
 
@@ -399,28 +409,46 @@ class CausalSelfAttention(nn.Module):
         B, T = x.size(0), x.size(1) # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
 
+        # NaN check on input
+        check_nan(x, "attention_input")
+
         # Calculate reference point for hyperbolic operations
         reference_point = calculate_reference_point(x)
+        check_nan(reference_point, "reference_point")
         
         # Map input to hyperbolic tangent space - use curvature parameter directly
         x_hyperbolic = logmap(reference_point, x, self.c)
+        check_nan(x_hyperbolic, "x_hyperbolic")
         
         # Project to QKV
         q, k, v = F.linear(x_hyperbolic, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
+        check_nan(q, "attention_q")
+        check_nan(k, "attention_k")
+        check_nan(v, "attention_v")
+        
         q, k = norm(q), norm(k) # QK norm @Grad62304977
+        check_nan(q, "normed_q")
+        check_nan(k, "normed_k")
+        
         q, k = self.rotary(q), self.rotary(k)
+        check_nan(q, "rotary_q")
+        check_nan(k, "rotary_k")
         
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, scale=0.12).transpose(1, 2)
+        check_nan(y, "attention_output", print_tensor=True)
+        
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
         
         # Output projection
         y = self.c_proj(y)
+        check_nan(y, "projected_attention_output")
         
         # Map back to hyperbolic space if specified - use curvature parameter directly
         if self.map_back_after_attention:
             y = expmap(reference_point, y, self.c)
+            check_nan(y, "hyperbolic_attention_output", print_tensor=True)
             
         return y, reference_point
 
@@ -436,13 +464,21 @@ class MLP(nn.Module):
         self.map_back_after_attention = map_back_after_attention
 
     def forward(self, x: Tensor, reference_point=None):
+        check_nan(x, "mlp_input")
+        
         x = self.c_fc(x)
+        check_nan(x, "mlp_fc_output")
+        
         x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+        check_nan(x, "mlp_activation_output")
+        
         x = self.c_proj(x)
+        check_nan(x, "mlp_proj_output")
         
         # Map back to hyperbolic space if not already done by attention - use curvature parameter directly
         if not self.map_back_after_attention and reference_point is not None:
             x = expmap(reference_point, x, self.c)
+            check_nan(x, "hyperbolic_mlp_output", print_tensor=True)
             
         return x
 
@@ -465,20 +501,30 @@ class Block(nn.Module):
         self.map_back_after_attention = map_back_after_attention
 
     def forward(self, x: Tensor, block_mask: BlockMask):
+        check_nan(x, f"block_input")
+        
         reference_point = None
         
         if self.attn is not None:
             attn_output, reference_point = self.attn(norm(x), block_mask)
+            check_nan(attn_output, "attn_output")
             x = x + attn_output
+            check_nan(x, "post_attention_block_state")
         else:
             # When attention is skipped, calculate reference point and map to hyperbolic space here
             reference_point = calculate_reference_point(x)
+            check_nan(reference_point, "reference_point_no_attn")
+            
             # Ensure curvature is on same device and dtype as input
             c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
             x = logmap(reference_point, x, c)
+            check_nan(x, "logmap_output_no_attn", print_tensor=True)
             
         mlp_output = self.mlp(norm(x), reference_point)
+        check_nan(mlp_output, "mlp_output")
+        
         x = x + mlp_output
+        check_nan(x, "block_output", print_tensor=True)
         
         return x
 
@@ -559,28 +605,52 @@ class GPT(nn.Module):
 
     def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor):
         assert input_seq.ndim == 1
+        check_nan(input_seq, "input_seq")
+        check_nan(target_seq, "target_seq")
 
         long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
         block_masks = [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
         assert len(block_masks) == len(self.blocks)
 
         x = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
+        check_nan(x, "initial_embedding", print_tensor=True)
 
         # U-net design by @brendanh0gan
         skip_connections = []
         n = len(self.skip_weights)
         for i in range(len(self.blocks)):
             if i >= n:
-                x = x + self.skip_weights[i - n] * skip_connections.pop()
+                skip_connection = skip_connections.pop()
+                check_nan(skip_connection, f"skip_connection_{i}")
+                check_nan(self.skip_weights[i - n], f"skip_weight_{i-n}")
+                x = x + self.skip_weights[i - n] * skip_connection
+                check_nan(x, f"after_skip_connection_{i}")
+            
+            block_name = f"block_{i}"
             x = self.blocks[i](x, block_masks[i])
+            if check_nan(x, f"after_{block_name}", print_tensor=True):
+                print(f"NaN detected after {block_name}!")
+            
             if i < n:
                 skip_connections.append(x)
 
         x = norm(x)
+        check_nan(x, "final_normed_output")
+        
         logits = self.lm_head(x).float()
+        check_nan(logits, "raw_logits")
+        
         # @Grad62304977 added tanh softcapping following Gemma 2 paper, @KoszarskyB reduced it from 30 to 15, @YouJiacheng shifted it by +15 (2*sigmoid(2*x)=tanh(x)+1)
         logits = 30 * torch.sigmoid(logits / (7.5 * x.size(-1)**0.5))
+        check_nan(logits, "softcapped_logits")
+        
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, reduction='sum' if self.training else 'mean')
+        if check_nan(loss, "loss", print_tensor=True):
+            print("NaN detected in loss! Printing model parameters with NaN:")
+            for name, param in self.named_parameters():
+                if check_nan(param, name):
+                    print(f"NaN in parameter: {name}, shape: {param.shape}")
+        
         return loss
 
 # -----------------------------------------------------------------------------
@@ -802,26 +872,67 @@ for step in range(train_steps + 1):
 
     # --------------- TRAINING SECTION -----------------
     inputs, targets = next(train_loader)
-    model(inputs, targets, get_window_size_blocks(step)).backward()
-    for name, param in model.named_parameters(): # Iterate with names for potential debugging
-        if param.grad is not None: # Check if gradient exists before reducing
-            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-    # set optimization hyperparameters
-    for opt in optimizers:
-        for group in opt.param_groups:
-            group["lr"] = group["initial_lr"] * get_lr(step)
-    for group in optimizer2.param_groups:
-        frac = min(step / 300, 1) # momentum warmup for muon
-        group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
-    # step the optimizers
-    for opt in optimizers:
-        opt.step()
-    # null the gradients
-    model.zero_grad(set_to_none=True)
-    # logging
-    approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
-    print0(f"step:{step+1}/{train_steps} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
+    
+    # Use the wrapped training function with NaN checks
+    if step == 0 or step % 10 == 0:  # Only check for NaNs every 10 steps to reduce overhead
+        loss = train_with_nan_checks(model, inputs, targets, get_window_size_blocks(step), optimizers)
+        print0(f"Step {step}: Loss = {loss.item():.4f}", console=True)
+    else:
+        loss = model(inputs, targets, get_window_size_blocks(step))
+        loss.backward()
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        
+        # set optimization hyperparameters
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["lr"] = group["initial_lr"] * get_lr(step)
+        for group in optimizer2.param_groups:
+            frac = min(step / 300, 1) # momentum warmup for muon
+            group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
+        
+        # step the optimizers
+        for opt in optimizers:
+            opt.step()
+        
+        # null the gradients
+        model.zero_grad(set_to_none=True)
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 dist.destroy_process_group()
+
+# Add NaN detection in backward pass
+def train_with_nan_checks(model, inputs, targets, sliding_window_num_blocks, optimizers):
+    # Forward pass
+    loss = model(inputs, targets, sliding_window_num_blocks)
+    
+    # Backward pass
+    loss.backward()
+    
+    # Check for NaNs in gradients
+    nan_in_grads = False
+    for name, param in model.named_parameters():
+        if param.grad is not None and check_nan(param.grad, f"grad_{name}"):
+            print(f"NaN detected in gradient for {name}")
+            nan_in_grads = True
+    
+    if nan_in_grads:
+        print("NaN detected in gradients. Skipping optimizer step.")
+        model.zero_grad(set_to_none=True)
+        return loss
+    
+    # Reduce gradients
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+    
+    # Update weights
+    for opt in optimizers:
+        opt.step()
+    
+    # Null the gradients
+    model.zero_grad(set_to_none=True)
+    
+    return loss
