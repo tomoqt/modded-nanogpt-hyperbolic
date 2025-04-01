@@ -108,6 +108,11 @@ mm_op.register_autograd(backward, setup_context=setup_context)
 
 def mobius_addition(x, y, c):
     """Mobius addition in hyperbolic space with curvature c"""
+    # Add safety check
+    if torch.isnan(x).any() or torch.isnan(y).any():
+        print("Warning: NaN detected in mobius_addition input")
+        return x
+        
     # Compute norms
     x_norm = torch.norm(x, dim=-1, keepdim=True)
     y_norm = torch.norm(y, dim=-1, keepdim=True)
@@ -117,15 +122,24 @@ def mobius_addition(x, y, c):
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
-    # Create epsilon as bfloat16 tensor
-    epsilon = torch.tensor(1e-8, device=x.device, dtype=torch.bfloat16)
+    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
+    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
     
     # Compute numerator and denominator following the standard formula
     numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
                 (1 - c * (x_norm ** 2)) * y
     denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
     
-    return numerator / (denominator + epsilon)
+    # Safeguard against division by very small values
+    safe_denominator = torch.clamp(denominator, min=epsilon)
+    result = numerator / safe_denominator
+    
+    # Final safety check
+    if torch.isnan(result).any():
+        print("Warning: NaN detected in mobius_addition output")
+        return x
+    
+    return result
 
 def scaling_factor(x, c):
     """Compute scaling factor for hyperbolic space with curvature c"""
@@ -136,45 +150,85 @@ def scaling_factor(x, c):
 
 def expmap(x, v, c):
     """Exponential map from tangent space to hyperbolic space with curvature c"""
+    # Add safety check
+    if torch.isnan(x).any() or torch.isnan(v).any():
+        print("Warning: NaN detected in expmap input")
+        return x
+    
     scaling_factor_x = scaling_factor(x, c)
     v_norm = torch.norm(v, dim=-1, keepdim=True)
     
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
-    # Create epsilon as bfloat16 tensor
-    epsilon = torch.tensor(1e-8, device=x.device, dtype=torch.bfloat16)
+    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
+    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
     
     # Safe division with epsilon
     safe_v_norm = v_norm + epsilon
-    second_term = (1/c**0.5)*torch.tanh((c*scaling_factor_x*v_norm**2/2)**0.5)*v/safe_v_norm
-    return mobius_addition(x, second_term, c)
+    
+    # Use clamp for safer operations
+    arg = torch.clamp(c*scaling_factor_x*v_norm**2/2, min=0.0, max=8.0)**0.5
+    second_term = (1/c**0.5)*torch.tanh(arg)*v/safe_v_norm
+    
+    result = mobius_addition(x, second_term, c)
+    
+    # Final safety check
+    if torch.isnan(result).any():
+        print("Warning: NaN detected in expmap output")
+        return x
+    
+    return result
 
 def logmap(x, u, c):
     """Logarithmic map from hyperbolic space to tangent space with curvature c"""
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
+    # Add safety check
+    if torch.isnan(x).any() or torch.isnan(u).any():
+        print("Warning: NaN detected in logmap input")
+        return torch.zeros_like(u)
+    
     scaling_factor_x = scaling_factor(x, c)
     mob_addition = mobius_addition(-x, u, c)
     addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
     
-    # Create epsilon as bfloat16 tensor
-    epsilon = torch.tensor(1e-8, device=x.device, dtype=torch.bfloat16)
+    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
+    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
     
     constant_factor = 2 / (scaling_factor_x * c**0.5 + epsilon)
     direction_factor = mob_addition / (addition_norm + epsilon)
-    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.999, max=0.999)
-    return constant_factor * torch.arctanh(arg) * direction_factor
+    
+    # More conservative clamping to avoid issues with arctanh
+    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.99, max=0.99)
+    result = constant_factor * torch.arctanh(arg) * direction_factor
+    
+    # Final safety check
+    if torch.isnan(result).any():
+        print("Warning: NaN detected in logmap output")
+        return torch.zeros_like(u)
+    
+    return result
 
 def calculate_reference_point(x):
     """Calculate reference point for hyperbolic operations"""
     B, T, C = x.size()
-    ref_point = torch.zeros_like(x[:, :1, :])
+    # Create a fixed origin point (zeros) as fallback reference
+    origin = torch.zeros_like(x[:, :1, :])
+    
     if T > 1:
+        # Get previous tokens as reference points
         ref_point = x[:, :-1, :]
         ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
-    return ref_point
+        
+        # Check for potential NaN values
+        if torch.isnan(ref_point).any():
+            print("Warning: NaN detected in reference point calculation, using origin instead")
+            return origin
+            
+        return ref_point
+    return origin
 
 # -----------------------------------------------------------------------------
 # Muon optimizer
