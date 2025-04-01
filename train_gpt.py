@@ -132,6 +132,9 @@ def mobius_addition(x, y, c):
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
+    # Clamp the curvature to prevent NaN issues
+    c = torch.clamp(c, min=1e-5, max=1.0)
+    
     # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
     epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
     
@@ -156,6 +159,10 @@ def scaling_factor(x, c):
     x_norm = torch.norm(x, dim=-1, keepdim=True)
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    
+    # Clamp the curvature to prevent NaN issues
+    c = torch.clamp(c, min=1e-5, max=1.0)
+    
     return 2/(1+c*x_norm**2)
 
 def expmap(x, v, c):
@@ -165,11 +172,14 @@ def expmap(x, v, c):
         print("Warning: NaN detected in expmap input")
         return x
     
-    scaling_factor_x = scaling_factor(x, c)
-    v_norm = torch.norm(v, dim=-1, keepdim=True)
-    
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    
+    # Clamp the curvature to prevent NaN issues
+    c = torch.clamp(c, min=1e-5, max=1.0)
+    
+    scaling_factor_x = scaling_factor(x, c)
+    v_norm = torch.norm(v, dim=-1, keepdim=True)
     
     # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
     epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
@@ -194,6 +204,9 @@ def logmap(x, u, c):
     """Logarithmic map from hyperbolic space to tangent space with curvature c"""
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
+    
+    # Clamp the curvature to prevent NaN issues
+    c = torch.clamp(c, min=1e-5, max=1.0)
     
     # Add safety check
     if torch.isnan(x).any() or torch.isnan(u).any():
@@ -416,7 +429,6 @@ class CausalSelfAttention(nn.Module):
             x_hyperbolic = x
         else:
             reference_point = calculate_reference_point(x)
-            print(x)
             check_nan(reference_point, "reference_point")
             x_hyperbolic = logmap(reference_point, x, self.c)
             check_nan(x_hyperbolic, "x_hyperbolic")
