@@ -357,7 +357,8 @@ class CausalSelfAttention(nn.Module):
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
 
-        # Fix value embeddings integration
+        ''' 
+        # Value embeddings functionality commented out
         if ve is not None:
             # Map value embeddings to hyperbolic tangent space if they aren't already
             ve_hyperbolic = logmap(reference_point, ve, self.c)
@@ -368,6 +369,9 @@ class CausalSelfAttention(nn.Module):
         else:
             # Skip mid-layers token value embeddings
             v = self.lambdas[0] * v
+        '''   
+        # Just use base v without value embeddings
+        v = self.lambdas[0] * v
         
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
@@ -470,7 +474,9 @@ class GPT(nn.Module):
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
+        '''
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
+        '''
         
         # Store hyperbolic parameters for blocks
         self.curvature_mode = curvature_mode
@@ -538,10 +544,14 @@ class GPT(nn.Module):
     def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor):
         assert input_seq.ndim == 1
 
+        '''
         ve = [value_embed(input_seq) for value_embed in self.value_embeds]
         # 012 ... 012 structure on token value embeddings by @YouJiacheng, improved on @leloykun's U-net structure
         ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
         assert len(ve) == len(self.blocks)
+        '''
+        # Use None for all value embeddings
+        ve = [None] * len(self.blocks)
 
         long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
         block_masks = [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
