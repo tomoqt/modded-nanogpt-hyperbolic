@@ -711,7 +711,7 @@ class Hyperparameters:
     # evaluation and logging
     val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
-    disable_hyperbolic_ops = True
+    disable_hyperbolic_ops = False
 args = Hyperparameters()
 
 # torchrun sets these env variables
