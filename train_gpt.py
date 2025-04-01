@@ -122,49 +122,32 @@ def mobius_addition(x, y, c):
     if torch.isnan(x).any() or torch.isnan(y).any():
         print("Warning: NaN detected in mobius_addition input")
         return x
-    
-    # Limit curvature to avoid extreme values    
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
-    c = torch.clamp(c, min=1e-4, max=2.0)
         
-    # Compute norms with stability
+    # Compute norms
     x_norm = torch.norm(x, dim=-1, keepdim=True)
     y_norm = torch.norm(y, dim=-1, keepdim=True)
-    
-    # Clamp norms to avoid extreme values
-    max_norm = torch.tensor(5.0, device=x.device, dtype=x.dtype)
-    x_norm = torch.clamp(x_norm, max=max_norm)
-    y_norm = torch.clamp(y_norm, max=max_norm)
-    
     # Compute the inner product
     inner_product = torch.sum(x * y, dim=-1, keepdim=True)
     
-    # Create epsilon using a larger value for bfloat16 stability
-    epsilon = torch.tensor(1e-3, device=x.device, dtype=x.dtype)
+    # Ensure c is on the same device as x
+    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
-    # Compute numerator and denominator with better stability
-    term1 = 1 + 2*c * inner_product
-    term2 = c * (y_norm ** 2)
-    term3 = 1 - c * (x_norm ** 2)
+    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
+    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
     
-    # Check for NaN in computation
-    if torch.isnan(term1).any() or torch.isnan(term2).any() or torch.isnan(term3).any():
-        print("Warning: NaN detected during mobius_addition computation")
-        return x
-        
-    numerator = term1 * x + term3 * y
+    # Compute numerator and denominator following the standard formula
+    numerator = (1 + 2*c * inner_product + c * (y_norm ** 2)) * x + \
+                (1 - c * (x_norm ** 2)) * y
     denominator = 1 + 2*c * inner_product + (c ** 2) * (x_norm ** 2) * (y_norm ** 2)
     
     # Safeguard against division by very small values
     safe_denominator = torch.clamp(denominator, min=epsilon)
     result = numerator / safe_denominator
     
-    # Replace any NaNs with x
-    result = torch.where(torch.isnan(result), x, result)
-    
-    # Clamp extreme values
-    max_val = torch.tensor(10.0, device=result.device, dtype=result.dtype)
-    result = torch.clamp(result, min=-max_val, max=max_val)
+    # Final safety check
+    if torch.isnan(result).any():
+        print("Warning: NaN detected in mobius_addition output")
+        return x
     
     return result
 
@@ -182,37 +165,28 @@ def expmap(x, v, c):
         print("Warning: NaN detected in expmap input")
         return x
     
-    # Limit curvature to avoid extreme values
-    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
-    c = torch.clamp(c, min=1e-4, max=1.0)
-    
-    # Calculate scaling factor with extra stability
     scaling_factor_x = scaling_factor(x, c)
-    
-    # Compute norm with stability
     v_norm = torch.norm(v, dim=-1, keepdim=True)
     
-    # Stronger epsilon for bfloat16 stability
-    epsilon = torch.tensor(1e-3, device=x.device, dtype=x.dtype)
+    # Ensure c is on the same device as x
+    c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
-    # Safe division with larger epsilon
+    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
+    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
+    
+    # Safe division with epsilon
     safe_v_norm = v_norm + epsilon
     
     # Use clamp for safer operations
-    arg = torch.clamp(c*scaling_factor_x*v_norm**2/2, min=0.0, max=3.0)**0.5
+    arg = torch.clamp(c*scaling_factor_x*v_norm**2/2, min=0.0, max=8.0)**0.5
+    second_term = (1/c**0.5)*torch.tanh(arg)*v/safe_v_norm
     
-    # Compute second term more safely
-    second_term = (1/torch.maximum(c**0.5, epsilon))*torch.tanh(arg)*v/safe_v_norm
-    
-    # Use safe mobius addition
     result = mobius_addition(x, second_term, c)
     
-    # Replace any NaNs with the input
-    result = torch.where(torch.isnan(result), x, result)
-    
-    # Also clamp extreme values
-    max_val = torch.tensor(10.0, device=result.device, dtype=result.dtype)
-    result = torch.clamp(result, min=-max_val, max=max_val)
+    # Final safety check
+    if torch.isnan(result).any():
+        print("Warning: NaN detected in expmap output")
+        return x
     
     return result
 
@@ -221,47 +195,29 @@ def logmap(x, u, c):
     # Ensure c is on the same device as x
     c = c.to(x.device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=x.device, dtype=x.dtype)
     
-    # Add safety check - return zeros for NaN inputs
+    # Add safety check
     if torch.isnan(x).any() or torch.isnan(u).any():
         print("Warning: NaN detected in logmap input")
         return torch.zeros_like(u)
     
-    # Limit curvature to avoid extreme values
-    c = torch.clamp(c, min=1e-4, max=2.0)
-    
-    # Calculate scaling factor with numerical stability
     scaling_factor_x = scaling_factor(x, c)
-    
-    # Use safe version of mobius addition
     mob_addition = mobius_addition(-x, u, c)
-    
-    # Handle potential NaNs from mobius_addition
-    if torch.isnan(mob_addition).any():
-        print("Warning: NaN detected after mobius_addition in logmap")
-        return torch.zeros_like(u)
-        
-    # Compute norm with stability
     addition_norm = torch.norm(mob_addition, dim=-1, keepdim=True)
     
-    # Stronger epsilon for bfloat16 stability
-    epsilon = torch.tensor(1e-3, device=x.device, dtype=x.dtype)
+    # Create epsilon using a larger value and the input dtype to avoid underflow in bfloat16
+    epsilon = torch.tensor(1e-4, device=x.device, dtype=x.dtype)
     
-    # More stable computation
     constant_factor = 2 / (scaling_factor_x * c**0.5 + epsilon)
     direction_factor = mob_addition / (addition_norm + epsilon)
     
-    # More conservative clamping for arctanh
-    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.9, max=0.9)
-    
-    # Create result with careful handling
+    # More conservative clamping to avoid issues with arctanh
+    arg = torch.clamp((c * addition_norm) ** 0.5, min=-0.99, max=0.99)
     result = constant_factor * torch.arctanh(arg) * direction_factor
     
-    # Final check to replace any NaNs with zeros
-    result = torch.where(torch.isnan(result), torch.zeros_like(result), result)
-    
-    # Also clamp extreme values to prevent issues later
-    max_val = torch.tensor(10.0, device=result.device, dtype=result.dtype)
-    result = torch.clamp(result, min=-max_val, max=max_val)
+    # Final safety check
+    if torch.isnan(result).any():
+        print("Warning: NaN detected in logmap output")
+        return torch.zeros_like(u)
     
     return result
 
@@ -389,13 +345,7 @@ class Muon(torch.optim.Optimizer):
 # PyTorch nn.Module definitions for the model
 
 def norm(x: Tensor):
-    # Add epsilon for numerical stability
-    epsilon = torch.tensor(1e-6, device=x.device, dtype=x.dtype)
-    # Check for NaN values before normalization
-    if torch.isnan(x).any():
-        print("Warning: NaN values detected in tensor before norm, replacing with zeros")
-        x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
-    return F.rms_norm(x, (x.size(-1),)) + epsilon  # Add small constant to avoid exact zeros
+    return F.rms_norm(x, (x.size(-1),))
 
 class CastedLinear(nn.Linear):
     def __init__(self, in_features: int, out_features: int, use_fp8=False, x_s=1.0, w_s=1.0, grad_s=1.0):
@@ -612,24 +562,6 @@ class GPT(nn.Module):
         # Add learnable skip connection weights for decoder layers
         assert num_layers % 2 == 0
         self.skip_weights = nn.Parameter(torch.ones(num_layers//2))
-        
-        # Initialize the embedding layer with safe values
-        self._reset_embedding_parameters()
-
-    def _reset_embedding_parameters(self):
-        # Safe initialization for the embedding layer
-        with torch.no_grad():
-            embedding_std = 0.02  # Standard value for transformer embeddings
-            self.embed.weight.normal_(mean=0.0, std=embedding_std)
-            
-            # Check for any NaNs and replace with zeros
-            if torch.isnan(self.embed.weight).any():
-                print("Warning: NaN values in embedding initialization, replacing with zeros")
-                self.embed.weight.data = torch.where(
-                    torch.isnan(self.embed.weight.data),
-                    torch.zeros_like(self.embed.weight.data),
-                    self.embed.weight.data
-                )
 
     def create_blockmasks(self, input_seq: Tensor, sliding_window_num_blocks: Tensor):
         BLOCK_SIZE = 128
@@ -680,24 +612,7 @@ class GPT(nn.Module):
         block_masks = [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
         assert len(block_masks) == len(self.blocks)
 
-        # Add safeguards for initial embedding
-        with torch.no_grad():
-            # Get embeddings and check for NaN values
-            embeddings = self.embed(input_seq)[None]
-            if torch.isnan(embeddings).any():
-                print("Warning: NaN values in raw embeddings, replacing with zeros")
-                embeddings = torch.where(torch.isnan(embeddings), torch.zeros_like(embeddings), embeddings)
-                
-            # Apply scaled normalization to avoid extreme values
-            x = norm(embeddings)
-            
-            # Final safeguard after normalization
-            if torch.isnan(x).any():
-                print("Warning: NaN values in normalized embeddings after norm, using fallback initialization")
-                x = torch.zeros_like(x)
-                # Initialize with small random values instead of zeros to maintain model functionality
-                x = x + torch.randn_like(x) * 0.01
-                
+        x = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
         check_nan(x, "initial_embedding", print_tensor=True)
 
         # U-net design by @brendanh0gan
@@ -839,9 +754,7 @@ model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, m
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
                        map_back_after_attention=args.map_back_after_attention).cuda()
-for m in model.modules():
-    if isinstance(m, nn.Embedding):
-        m.bfloat16()
+
 for param in model.parameters():
     dist.broadcast(param.detach(), 0)
 
