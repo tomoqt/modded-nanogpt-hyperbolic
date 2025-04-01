@@ -622,8 +622,23 @@ for step in range(train_steps + 1):
     # --------------- TRAINING SECTION -----------------
     inputs, targets = next(train_loader)
     model(inputs, targets, get_window_size_blocks(step)).backward()
+    
+    # Check for any None gradients and warn if found
+    if step == 0 or step % 100 == 0:  # Only check periodically to avoid overhead
+        none_grads = []
+        for name, param in model.named_parameters():
+            if param.requires_grad and param.grad is None:
+                none_grads.append(name)
+        if none_grads:
+            print0(f"WARNING: The following parameters have None gradients at step {step}: {none_grads}", console=True)
+            
     for name, param in model.named_parameters(): # Iterate with names for potential debugging
         if param.grad is not None: # Check if gradient exists before reducing
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        elif param.requires_grad:
+            # Create zero gradient if missing but required
+            param.grad = torch.zeros_like(param)
+            print0(f"Created zero grad for parameter {name} at step {step}", console=True)
             dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     # set optimization hyperparameters
     for opt in optimizers:
