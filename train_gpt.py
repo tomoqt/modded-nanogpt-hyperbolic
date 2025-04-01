@@ -755,6 +755,7 @@ training_time_ms = 0
 # start the clock
 torch.cuda.synchronize()
 t0 = time.perf_counter()
+torch.autograd.set_detect_anomaly(True)   # enable anomaly detection for nan debugging
 # begin training
 train_steps = args.num_iterations
 for step in range(train_steps + 1):
