@@ -357,13 +357,18 @@ class CausalSelfAttention(nn.Module):
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
 
-        # Apply value embeddings if provided, ensuring proper shape
+        # Fix value embeddings integration
         if ve is not None:
-            ve = ve.view(B, T, self.num_heads, self.head_dim)
-            v = self.lambdas[0] * v + self.lambdas[1] * ve
+            # Map value embeddings to hyperbolic tangent space if they aren't already
+            ve_hyperbolic = logmap(reference_point, ve, self.c)
+            # Reshape to match v's shape
+            ve_shaped = ve_hyperbolic.view_as(v)
+            # Combine with weighted sum
+            v = self.lambdas[0] * v + self.lambdas[1] * ve_shaped
         else:
+            # Skip mid-layers token value embeddings
             v = self.lambdas[0] * v
-   
+        
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, scale=0.12).transpose(1, 2)
@@ -437,6 +442,20 @@ class Block(nn.Module):
         x = x + mlp_output
         
         return x
+
+class ValueEmbedding(nn.Module):
+    def __init__(self, vocab_size, model_dim, curvature=1.0):
+        super().__init__()
+        self.embed = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
+        self.c = curvature
+
+    def forward(self, inputs, reference_point=None):
+        ve = [emb(inputs) for emb in self.embed]
+        # Map value embeddings to hyperbolic space if reference point is provided
+        if reference_point is not None:
+            ve = [expmap(reference_point, v, self.c) for v in ve]
+        ve = [ve[0], ve[1], ve[2], None, None, None, None, None, None, ve[0], ve[1], ve[2]]
+        return ve
 
 # -----------------------------------------------------------------------------
 # The main model
