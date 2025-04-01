@@ -406,11 +406,11 @@ class Block(nn.Module):
         
         # Handle curvature - three modes: fixed, parametric, or random
         if curvature_mode == 'fixed':
-            self.c = torch.tensor(curvature, dtype=torch.bfloat16)  # Ensure it's a tensor with bfloat16 dtype
+            self.c = torch.tensor(curvature)  # Ensure it's a tensor with bfloat16 dtype
         elif curvature_mode == 'parametric':
-            self.c = nn.Parameter(torch.tensor(curvature, dtype=torch.bfloat16))
+            self.c = nn.Parameter(torch.tensor(curvature))
         else:  # Default to random initialization
-            self.c = nn.Parameter(torch.rand(1, dtype=torch.bfloat16))
+            self.c = nn.Parameter(torch.rand(1))
             self.c.requires_grad = True
             
         # Pass curvature parameter directly instead of just its value
@@ -426,6 +426,11 @@ class Block(nn.Module):
         if self.attn is not None:
             attn_output, reference_point = self.attn(norm(x), ve, block_mask)
             x = x + attn_output
+        else:
+            # Calculate reference point and map to hyperbolic tangent space when attention is skipped
+            reference_point = calculate_reference_point(x)
+            c = self.c.to(x.device).to(x.dtype) if isinstance(self.c, torch.Tensor) else torch.tensor(self.c, device=x.device, dtype=x.dtype)
+            x = logmap(reference_point, x, c)
             
         mlp_output = self.mlp(norm(x), reference_point)
         x = x + mlp_output
