@@ -774,11 +774,11 @@ scalar_params = [p for p in model.parameters() if p.ndim < 2]
 head_params = [model.lm_head.weight]
 
 # init the optimizer(s)
-adam_params = [dict(params=head_params, lr=0.00000011), dict(params=embed_params, lr=0.000003), dict(params=scalar_params, lr=0.002)]
+adam_params = [dict(params=head_params, lr=0.011), dict(params=embed_params, lr=0.003), dict(params=scalar_params, lr=0.002)]
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
 optimizer1 = torch.optim.Adam(adam_params, betas=(0.8, 0.95), eps=1e-10, fused=True)
-optimizer2 = Muon(hidden_matrix_params, lr=0.00000025, momentum=0.95, rank=rank, world_size=world_size)
+optimizer2 = Muon(hidden_matrix_params, lr=0.0025, momentum=0.95, rank=rank, world_size=world_size)
 optimizers = [optimizer1, optimizer2]
 for opt in optimizers:
     for group in opt.param_groups:
@@ -921,8 +921,23 @@ for step in range(train_steps + 1):
     else:
         loss = model(inputs, targets, get_window_size_blocks(step))
         loss.backward()
+        
+        # Check for any None gradients and fix them
+        if step == 0 or step % 100 == 0:  # Only check periodically to avoid overhead
+            none_grads = []
+            for name, param in model.named_parameters():
+                if param.requires_grad and param.grad is None:
+                    none_grads.append(name)
+            if none_grads:
+                print0(f"WARNING: The following parameters have None gradients at step {step}: {none_grads}", console=True)
+        
         for name, param in model.named_parameters():
             if param.grad is not None:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+            elif param.requires_grad:
+                # Create zero gradient if missing but required
+                param.grad = torch.zeros_like(param)
+                print0(f"Created zero grad for parameter {name} at step {step}", console=True)
                 dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
         
         # set optimization hyperparameters
