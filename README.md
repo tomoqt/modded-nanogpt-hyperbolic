@@ -25,7 +25,7 @@ Contributors list (growing with each new record): [@bozavlado](https://x.com/boz
 
 To run the current record, run the following commands.
 ```bash
-git clone https://github.com/tomoqt/modded-nanogpt-hyperbolic.git && cd modded-nanogpt
+git clone https://github.com/tomoqt/modded-nanogpt-hyperbolic.git && cd modded-nanogpt-hyperbolic
 pip install -r requirements.txt
 pip install --pre torch==2.8.0.dev20250330+cu126 --index-url https://download.pytorch.org/whl/nightly/cu126 --upgrade
 python data/cached_fineweb10B.py 8 # downloads only the first 800M training tokens to save time
