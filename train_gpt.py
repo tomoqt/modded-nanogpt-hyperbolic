@@ -10,7 +10,6 @@ import glob
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-os.environ["PYTORCH_TRITON_MAX_SHARED_MEMORY_PER_BLOCK"] = "98304"  # Set below hardware limit
 
 # Configure shared memory limits for Triton kernels
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -456,7 +455,7 @@ class Rotary(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128, curvature=1.0,
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=120, curvature=1.0,
                  map_back_after_attention=True):
         super().__init__()
         self.num_heads = num_heads
