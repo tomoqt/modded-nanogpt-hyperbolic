@@ -455,7 +455,7 @@ class Rotary(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=108, curvature=1.0,
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=64, curvature=1.0,
                  map_back_after_attention=True):
         super().__init__()
         self.num_heads = num_heads
