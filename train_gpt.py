@@ -10,6 +10,7 @@ import glob
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+os.environ["PYTORCH_TRITON_MAX_SHARED_MEMORY_PER_BLOCK"] = "98304"  # Set below hardware limit
 
 # Configure shared memory limits for Triton kernels
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
