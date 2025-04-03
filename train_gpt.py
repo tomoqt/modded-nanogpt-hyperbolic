@@ -827,7 +827,7 @@ scalar_params = [p for p in model.parameters() if p.ndim < 2]
 head_params = [model.lm_head.weight]
 
 # init the optimizer(s)
-adam_params = [dict(params=head_params, lr=0.11), dict(params=embed_params, lr=0.3), dict(params=scalar_params, lr=0.02)]
+adam_params = [dict(params=head_params, lr=0.05), dict(params=embed_params, lr=0.03), dict(params=scalar_params, lr=0.02)]
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
 optimizer1 = torch.optim.Adam(adam_params, betas=(0.8, 0.95), eps=1e-10, fused=True)
