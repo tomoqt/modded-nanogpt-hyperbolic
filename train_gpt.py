@@ -494,7 +494,7 @@ class CausalSelfAttention(nn.Module):
                                                                                         self.head_dim).chunk(3, dim=-2)
         q, k = norm(q), norm(k)  # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
-
+        ve = None
         if ve is not None:
             v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
         else:  # skip mid-layers token value embeddings by @YouJiacheng
@@ -751,7 +751,7 @@ class Hyperparameters:
     # architecture
     vocab_size = 50257
     # hyperbolic parameters
-    curvature_mode = 'parametric'  # 'fixed', 'parametric', or 'random'
+    curvature_mode = 'random'  # 'fixed', 'parametric', or 'random'
     curvature = 1.0  # Fixed curvature value when curvature_mode is 'fixed'
     map_back_after_attention = False  # whether to map back to hyperbolic space after attention or after the MLP
     # evaluation and logging
