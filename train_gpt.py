@@ -800,7 +800,7 @@ class Hyperparameters:
     # evaluation and logging
     val_loss_every = 125  # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
-    use_wandb = False  # Whether to use Weights & Biases for logging
+    use_wandb = True  # Whether to use Weights & Biases for logging
 
 
 args = Hyperparameters()
