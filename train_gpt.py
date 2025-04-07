@@ -793,7 +793,7 @@ class Hyperparameters:
     # architecture
     vocab_size = 50257
     # hyperbolic parameters
-    curvature_mode = 'random'  # 'fixed', 'parametric', 'tied', or 'random'
+    curvature_mode = 'tied'  # 'fixed', 'parametric', 'tied', or 'random'
     curvature = 1.0  # Fixed curvature value when curvature_mode is 'fixed'
     map_back_after_attention = False  # whether to map back to hyperbolic space after attention or after the MLP
     per_head_curvature = True  # whether to use a different curvature for each head
