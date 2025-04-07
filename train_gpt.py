@@ -798,7 +798,7 @@ class Hyperparameters:
     map_back_after_attention = False  # whether to map back to hyperbolic space after attention or after the MLP
     per_head_curvature = True  # whether to use a different curvature for each head
     # evaluation and logging
-    val_loss_every = 25  # every how many steps to evaluate val loss? 0 for only at the end
+    val_loss_every = 125  # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
     use_wandb = False  # Whether to use Weights & Biases for logging
 
