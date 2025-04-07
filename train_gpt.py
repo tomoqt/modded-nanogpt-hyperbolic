@@ -201,7 +201,7 @@ mm_op.register_autograd(backward, setup_context=setup_context)
 #         ref_point = F.pad(ref_point, (0, 0, 1, 0), mode='constant', value=0)
 #     return ref_point
 
-HYPERBOLIC_EPSILON = 1e-5  # Increased from 1e-8
+HYPERBOLIC_EPSILON = 1e-4  # Increased from 1e-5 for more aggressive clamping
 
 
 def mobius_addition(x, y, c):
@@ -277,7 +277,7 @@ def logmap(x, u, c):
     arg_to_arctanh = sqrt_c * safe_mob_add_norm
     # Clamp again just before arctanh for safety, ensuring it's less than 1
     # Using clamp with only max (Number) is fine
-    clamped_arg = arg_to_arctanh.clamp(max=1.0 - HYPERBOLIC_EPSILON)
+    clamped_arg = arg_to_arctanh.clamp(max=0.9)  # More aggressive clamping below 1.0
     # Ensure positive after sqrt/potential numerical issues before arctanh
     clamped_arg = clamped_arg.clamp(min=0.0)  # Clamp min separately too
 
