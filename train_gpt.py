@@ -7,9 +7,21 @@ import uuid
 import time
 import copy
 import glob
-from dataclasses import dataclass
+import argparse
+from dataclasses import dataclass, asdict
 from functools import lru_cache
 from pathlib import Path
+
+# Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train hyperbolic nanogpt with learning rate sweep")
+    parser.add_argument("--lr_scale", type=float, default=1.0, help="Global learning rate scaling factor")
+    parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases for logging")
+    parser.add_argument("--wandb_project", type=str, default="nanogpt-hyperbolic", help="WandB project name")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="WandB entity/team name")
+    parser.add_argument("--wandb_name", type=str, default=None, help="WandB run name")
+    parser.add_argument("--wandb_tags", type=str, default=None, help="Comma-separated tags for wandb")
+    return parser.parse_args()
 
 # Configure shared memory limits for Triton kernels
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -546,17 +558,26 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, curvature_mode='parametric',
-                 curvature=1.0, map_back_after_attention=True):
+                 curvature=1.0, map_back_after_attention=True, per_head_curvature=True):
         super().__init__()
 
-        # Handle curvature - three modes: fixed, parametric, or random
+        # Handle curvature - four modes: fixed, parametric, tied, or random
         if curvature_mode == 'fixed':
             self.c = torch.tensor(curvature)  # Ensure it's a tensor with bfloat16 dtype
         elif curvature_mode == 'parametric':
             self.c = nn.Parameter(torch.tensor(curvature))
-        else:  # Default to random initialization
-            self.c = nn.Parameter(torch.rand(1))
             self.c.requires_grad = True
+        elif curvature_mode == 'tied':
+            # Use a temporary value that will be replaced with shared parameter
+            # This ensures dependent modules aren't initialized with None
+            self.c = 1.0
+        else:  # Default to random initialization
+            if not per_head_curvature:
+                self.c = nn.Parameter(torch.rand(1))  # Single random value for the entire block
+                self.c.requires_grad = True
+            else:
+                self.c = nn.Parameter(torch.rand(num_heads).repeat_interleave(dim//num_heads))
+                self.c.requires_grad = True
 
         # Pass curvature parameter directly instead of just its value
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len, curvature=self.c,
@@ -595,7 +616,7 @@ def next_multiple_of_n(v: float | int, *, n: int):
 
 class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int,
-                 curvature_mode='parametric', curvature=1.0, map_back_after_attention=True):
+                 curvature_mode='parametric', curvature=1.0, map_back_after_attention=True, per_head_curvature=True):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
@@ -606,15 +627,35 @@ class GPT(nn.Module):
         self.curvature_mode = curvature_mode
         self.curvature = curvature
         self.map_back_after_attention = map_back_after_attention
+        self.per_head_curvature = per_head_curvature
+
+        # Create shared curvature parameter if using tied mode
+        self.shared_curvature = None
+        if curvature_mode == 'tied':
+            if per_head_curvature:
+                # Create one parameter per head, shared across all blocks
+                self.shared_curvature = nn.Parameter(torch.rand(num_heads).repeat_interleave(model_dim//num_heads))
+            else:
+                # Create a single parameter shared across all blocks
+                self.shared_curvature = nn.Parameter(torch.tensor(1.0).view(1))
 
         # Initialize blocks with hyperbolic parameters
         self.blocks = nn.ModuleList([
             Block(model_dim, num_heads, max_seq_len, i,
                   curvature_mode=curvature_mode,
                   curvature=curvature,
-                  map_back_after_attention=map_back_after_attention)
+                  map_back_after_attention=map_back_after_attention,
+                  per_head_curvature=per_head_curvature)
             for i in range(num_layers)
         ])
+
+        # Pass the shared curvature parameter if using tied mode
+        if curvature_mode == 'tied' and self.shared_curvature is not None:
+            for block in self.blocks:
+                block.c = self.shared_curvature
+                if block.attn is not None:
+                    block.attn.c = self.shared_curvature
+                block.mlp.c = self.shared_curvature
 
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
@@ -748,15 +789,18 @@ class Hyperparameters:
     # optimization
     num_iterations = 1770  # number of iterations to run
     cooldown_frac = 0.4  # fraction of training spent cooling down the learning rate
+    lr_scale = 1.0  # Global learning rate scaling factor for all optimizer learning rates
     # architecture
     vocab_size = 50257
     # hyperbolic parameters
-    curvature_mode = 'random'  # 'fixed', 'parametric', or 'random'
+    curvature_mode = 'random'  # 'fixed', 'parametric', 'tied', or 'random'
     curvature = 1.0  # Fixed curvature value when curvature_mode is 'fixed'
     map_back_after_attention = False  # whether to map back to hyperbolic space after attention or after the MLP
+    per_head_curvature = True  # whether to use a different curvature for each head
     # evaluation and logging
     val_loss_every = 25  # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
+    use_wandb = False  # Whether to use Weights & Biases for logging
 
 
 args = Hyperparameters()
@@ -771,6 +815,29 @@ torch.cuda.set_device(device)
 dist.init_process_group(backend="nccl", device_id=device)
 dist.barrier()
 master_process = (rank == 0)  # this process will do logging, checkpointing etc.
+
+# Update hyperparameters from command line arguments
+if master_process:
+    cli_args = parse_args()
+    for key, value in vars(cli_args).items():
+        if hasattr(args, key):
+            setattr(args, key, value)
+
+# Initialize wandb if enabled (only on master process)
+if master_process and args.use_wandb:
+    try:
+        import wandb
+        wandb_tags = cli_args.wandb_tags.split(",") if cli_args.wandb_tags else None
+        wandb.init(
+            project=cli_args.wandb_project,
+            entity=cli_args.wandb_entity,
+            config=asdict(args),
+            name=cli_args.wandb_name,
+            tags=wandb_tags,
+        )
+    except ImportError:
+        print("Warning: wandb not installed. Proceeding without wandb logging.")
+        args.use_wandb = False
 
 # begin logging
 logfile = None
@@ -813,7 +880,8 @@ model: nn.Module = GPT(vocab_size=args.vocab_size, num_layers=12, num_heads=6, m
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        curvature_mode=args.curvature_mode,
                        curvature=args.curvature,
-                       map_back_after_attention=args.map_back_after_attention).cuda()
+                       map_back_after_attention=args.map_back_after_attention,
+                       per_head_curvature=args.per_head_curvature).cuda()
 for m in model.modules():
     if isinstance(m, nn.Embedding):
         m.bfloat16()
@@ -827,11 +895,13 @@ scalar_params = [p for p in model.parameters() if p.ndim < 2]
 head_params = [model.lm_head.weight]
 
 # init the optimizer(s)
-adam_params = [dict(params=head_params, lr=0.02), dict(params=embed_params, lr=0.6), dict(params=scalar_params, lr=0.01)]
+adam_params = [dict(params=head_params, lr=args.lr_scale * 0.02), 
+               dict(params=embed_params, lr=args.lr_scale * 0.6), 
+               dict(params=scalar_params, lr=args.lr_scale * 0.01)]
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
 optimizer1 = torch.optim.Adam(adam_params, betas=(0.8, 0.95), eps=1e-10, fused=True)
-optimizer2 = Muon(hidden_matrix_params, lr=0.022, momentum=0.95, rank=rank, world_size=world_size)
+optimizer2 = Muon(hidden_matrix_params, lr=args.lr_scale * 0.022, momentum=0.95, rank=rank, world_size=world_size)
 optimizers = [optimizer1, optimizer2]
 for opt in optimizers:
     for group in opt.param_groups:
@@ -923,6 +993,17 @@ for step in range(train_steps + 1):
         print0(
             f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / max(step, 1):.2f}ms",
             console=True)
+        
+        # Log metrics to wandb
+        if master_process and args.use_wandb:
+            metrics = {
+                "val/loss": val_loss.item(),
+                "train/time_ms": training_time_ms,
+                "train/step_avg_ms": training_time_ms / max(step, 1),
+                "train/step": step,
+            }
+            wandb.log(metrics, step=step)
+            
         model.train()
         # start the clock again
         torch.cuda.synchronize()
@@ -939,7 +1020,8 @@ for step in range(train_steps + 1):
 
     # --------------- TRAINING SECTION -----------------
     inputs, targets = next(train_loader)
-    model(inputs, targets, get_window_size_blocks(step)).backward()
+    loss = model(inputs, targets, get_window_size_blocks(step))
+    loss.backward()
     for name, param in model.named_parameters():  # Iterate with names for potential debugging
         if param.grad is not None:  # Check if gradient exists before reducing
             dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
@@ -955,6 +1037,19 @@ for step in range(train_steps + 1):
         opt.step()
     # null the gradients
     model.zero_grad(set_to_none=True)
+    
+    # Log training metrics to wandb
+    if master_process and args.use_wandb and step % 10 == 0:  # Log every 10 steps to reduce overhead
+        lr_adam = optimizer1.param_groups[0]['lr']
+        lr_muon = optimizer2.param_groups[0]['lr']
+        metrics = {
+            "train/loss": loss.item(),
+            "train/lr_adam": lr_adam,
+            "train/lr_muon": lr_muon,
+            "train/lr_scale": args.lr_scale,
+        }
+        wandb.log(metrics, step=step)
+        
     # logging
     approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
     print0(
@@ -963,4 +1058,9 @@ for step in range(train_steps + 1):
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+
+# Close wandb if it was initialized
+if master_process and args.use_wandb:
+    wandb.finish()
+
 dist.destroy_process_group()
