@@ -827,7 +827,16 @@ if master_process:
 if master_process and args.use_wandb:
     try:
         import wandb
+        # Force CLI login if not already logged in
+        try:
+            wandb.ensure_login()
+        except:
+            print("Please login to wandb using the CLI prompt")
+            import subprocess
+            subprocess.run(["wandb", "login"])
+            
         wandb_tags = cli_args.wandb_tags.split(",") if cli_args.wandb_tags else None
+        print(f"Initializing wandb with project={cli_args.wandb_project}, entity={cli_args.wandb_entity}")
         wandb.init(
             project=cli_args.wandb_project,
             entity=cli_args.wandb_entity,
@@ -835,8 +844,13 @@ if master_process and args.use_wandb:
             name=cli_args.wandb_name,
             tags=wandb_tags,
         )
+        print("Successfully initialized wandb")
     except ImportError:
         print("Warning: wandb not installed. Proceeding without wandb logging.")
+        args.use_wandb = False
+    except Exception as e:
+        print(f"Error initializing wandb: {str(e)}")
+        print("Proceeding without wandb logging")
         args.use_wandb = False
 
 # begin logging
