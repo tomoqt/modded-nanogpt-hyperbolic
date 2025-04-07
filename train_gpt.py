@@ -830,29 +830,28 @@ if master_process and args.use_wandb:
         # Force CLI login if not already logged in
         try:
             wandb.ensure_login()
+            print("WandB login successful")
         except:
             print("Please login to wandb using the CLI prompt")
             import subprocess
             subprocess.run(["wandb", "login"])
         
-        # Get the username and organization you're logged in as
-        import subprocess
-        whoami_output = subprocess.check_output(["wandb", "whoami"], text=True)
-        print(f"WandB whoami output: {whoami_output}")
-        
-        # Use logged in organization or specify entity from arguments
+        # Use entity from arguments or environment variable
         wandb_entity = cli_args.wandb_entity
         if not wandb_entity or wandb_entity == "$(whoami)":
-            # Default to "aisparks" based on the current login
-            wandb_entity = "aisparks" 
+            # Try to get from environment variable or use default
+            wandb_entity = os.environ.get("WANDB_ENTITY", "aisparks")
             
         wandb_tags = cli_args.wandb_tags.split(",") if cli_args.wandb_tags else None
-        print(f"Initializing wandb with project={cli_args.wandb_project}, entity={wandb_entity}")
+        wandb_project = cli_args.wandb_project or os.environ.get("WANDB_PROJECT", "nanogpt-hyperbolic")
+        wandb_name = cli_args.wandb_name or os.environ.get("WANDB_NAME", f"run-{uuid.uuid4()}")
+        
+        print(f"Initializing wandb with project={wandb_project}, entity={wandb_entity}")
         wandb.init(
-            project=cli_args.wandb_project,
+            project=wandb_project,
             entity=wandb_entity,
             config=asdict(args),
-            name=cli_args.wandb_name,
+            name=wandb_name,
             tags=wandb_tags,
         )
         print("Successfully initialized wandb")
