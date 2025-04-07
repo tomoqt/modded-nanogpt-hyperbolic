@@ -834,12 +834,23 @@ if master_process and args.use_wandb:
             print("Please login to wandb using the CLI prompt")
             import subprocess
             subprocess.run(["wandb", "login"])
+        
+        # Get the username and organization you're logged in as
+        import subprocess
+        whoami_output = subprocess.check_output(["wandb", "whoami"], text=True)
+        print(f"WandB whoami output: {whoami_output}")
+        
+        # Use logged in organization or specify entity from arguments
+        wandb_entity = cli_args.wandb_entity
+        if not wandb_entity or wandb_entity == "$(whoami)":
+            # Default to "aisparks" based on the current login
+            wandb_entity = "aisparks" 
             
         wandb_tags = cli_args.wandb_tags.split(",") if cli_args.wandb_tags else None
-        print(f"Initializing wandb with project={cli_args.wandb_project}, entity={cli_args.wandb_entity}")
+        print(f"Initializing wandb with project={cli_args.wandb_project}, entity={wandb_entity}")
         wandb.init(
             project=cli_args.wandb_project,
-            entity=cli_args.wandb_entity,
+            entity=wandb_entity,
             config=asdict(args),
             name=cli_args.wandb_name,
             tags=wandb_tags,
