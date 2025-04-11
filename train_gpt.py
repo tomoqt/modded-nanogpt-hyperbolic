@@ -829,10 +829,10 @@ class Hyperparameters:
     # hyperbolic parameters
     curvature_mode = 'tied'  # 'fixed', 'parametric', 'tied', or 'random'
     curvature = 1.0  # Fixed curvature value when curvature_mode is 'fixed'
-    curvature_initialization = field(default_factory=lambda: [1.0-1.0e-3] + [1.0e-3] * 11)  # per-layer initialization
+    curvature_initialization: list[float] = field(default_factory=lambda: [1.0-1.0e-3] + [1.0e-3] * 11)  # per-layer initialization
     map_back_after_attention = False  # whether to map back to hyperbolic space after attention or after the MLP
     per_head_curvature = True  # whether to use a different curvature for each head
-    use_embedding_curvature = True  # whether to use a curvature element also for the embedding layer
+    use_embedding_curvature = False  # whether to use a curvature element also for the embedding layer
     
     # evaluation and logging
     val_loss_every = 125  # every how many steps to evaluate val loss? 0 for only at the end
