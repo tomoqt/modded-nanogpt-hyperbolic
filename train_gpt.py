@@ -671,7 +671,7 @@ class GPT(nn.Module):
         self.lm_head.weight.detach().zero_()  # @Grad62304977
         # Add learnable skip connection weights for decoder layers
         assert num_layers % 2 == 0
-        self.skip_weights = nn.Parameter(torch.ones(num_layers // 2))
+       # self.skip_weights = nn.Parameter(torch.ones(num_layers // 2))
 
     def create_blockmasks(self, input_seq: Tensor, sliding_window_num_blocks: Tensor):
         BLOCK_SIZE = 128
@@ -735,14 +735,16 @@ class GPT(nn.Module):
         x = x0 = norm(self.embed(input_seq)[None])  # use of norm here by @Grad62304977
 
         # U-net design by @brendanh0gan
-        skip_connections = []
-        n = len(self.skip_weights)
+        # Comment out skip connection code since we removed skip_weights
+        # skip_connections = []
+        # n = len(self.skip_weights)
         for i in range(len(self.blocks)):
-            if i >= n:
-                x = x + self.skip_weights[i - n] * skip_connections.pop()
+            # Comment out skip weight application
+            # if i >= n:
+            #     x = x + self.skip_weights[i - n] * skip_connections.pop()
             x = self.blocks[i](x, ve[i], x0, block_masks[i])
-            if i < n:
-                skip_connections.append(x)
+            # if i < n:
+            #     skip_connections.append(x)
 
         x = norm(x)
         logits = self.lm_head(x).float()
