@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define learning rate scales to try
-LR_SCALES=(0.5 1 1.2 1.5 2 3)
+LR_SCALES=(0.05 0.1 0.15 0.25 0.5 1 2)
 
 # Set WandB environment variables (will be passed to all runs)
 export WANDB_PROJECT="nanogpt-hyperbolic-lrs"
