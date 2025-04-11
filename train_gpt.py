@@ -918,7 +918,7 @@ if master_process and args.use_wandb:
         model,
         log="all",  # log both gradients and weights
         log_freq=10,  # log every 10 steps
-        log_graph=True  # log the model graph
+        log_graph=False  # log the model graph
     )
 
 # collect the parameters to optimize
