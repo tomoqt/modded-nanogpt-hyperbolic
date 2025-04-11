@@ -912,6 +912,15 @@ for m in model.modules():
 for param in model.parameters():
     dist.broadcast(param.detach(), 0)
 
+# Watch model gradients and weights with wandb
+if master_process and args.use_wandb:
+    wandb.watch(
+        model,
+        log="all",  # log both gradients and weights
+        log_freq=10,  # log every 10 steps
+        log_graph=True  # log the model graph
+    )
+
 # collect the parameters to optimize
 hidden_matrix_params = [p for n, p in model.blocks.named_parameters() if p.ndim >= 2 and "embed" not in n]
 embed_params = [p for n, p in model.named_parameters() if "embed" in n]
